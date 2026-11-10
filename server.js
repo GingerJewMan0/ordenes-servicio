@@ -1,3 +1,32 @@
+const express = require('express');
+const { Pool } = require('pg');
+const cors = require('cors');
+const path = require('path');
+require('dotenv').config();
+
+const app = express();
+const port = process.env.PORT || 3000;
+
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false
+});
+
+app.use(cors());
+app.use(express.json());
+app.use(express.static(path.join(__dirname, 'public')));
+
+// Obtener todas las órdenes de servicio
+app.get('/api/ordenes', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM ordenes_servicio ORDER BY folio_orden DESC');
+    res.json(result.rows);
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).send('Error al obtener las órdenes de servicio');
+  }
+});
+
 // Crear una nueva orden de servicio (incluyendo empresa)
 app.post('/api/ordenes', async (req, res) => {
   const {
@@ -33,4 +62,8 @@ app.post('/api/ordenes', async (req, res) => {
     }
     res.status(500).send('Error al registrar la orden de servicio');
   }
+});
+
+app.listen(port, () => {
+  console.log(`Servidor de órdenes corriendo en el puerto ${port}`);
 });
