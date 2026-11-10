@@ -1,0 +1,6 @@
+Copia tus logos PNG aquí con estos nombres EXACTOS:
+- opciones.png
+- mexus.png
+
+Luego cambia logo: null por los require(...) en src/services/api.js.
+No basta con copiar los archivos: debes ACTIVAR los require.

@@ -1,0 +1,12 @@
+{
+  "expo": {
+    "extra": {
+      "eas": {
+        "projectId": "72ab77f1-9511-4c3f-86ab-3d5815334871"
+      }
+    },
+    "android": {
+      "package": "com.gingerjew0.ordenesservicioapp"
+    }
+  }
+}
