@@ -117,3 +117,41 @@ export const leerOrdenLocal = async (folio, empresaId) => {
 
 export const nombreEmpresa = (empresaId) =>
   EMPRESAS.find((e) => e.id === empresaId)?.nombre || 'Empresa sin especificar';
+
+
+// Una orden confirmada por el POST cuyo folio todavía no fue devuelto conserva
+// sus fotografías y firmas sin inventar un número de documento.
+const PENDIENTE_PREFIX = `${KEY_PREFIX}pendiente/`;
+export const guardarOrdenPendiente = async (orden, backendId = null) => {
+  const clave = `${PENDIENTE_PREFIX}${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  await AsyncStorage.setItem(clave, JSON.stringify({
+    ...orden,
+    backendId: Number(backendId) || null,
+    creadoEn: new Date().toISOString()
+  }));
+  return clave;
+};
+
+export const reconciliarOrdenesPendientes = async (ordenesRemotas) => {
+  if (!Array.isArray(ordenesRemotas) || ordenesRemotas.length === 0) return;
+  const claves = (await AsyncStorage.getAllKeys()).filter((x) => x.startsWith(PENDIENTE_PREFIX));
+  if (!claves.length) return;
+  const pares = await AsyncStorage.multiGet(claves);
+  for (const [clave, contenido] of pares) {
+    if (!contenido) continue;
+    try {
+      const pendiente = JSON.parse(contenido);
+      if (!pendiente?.backendId) continue; // Sin ID no sería segura la asociación.
+      const servidor = ordenesRemotas.find((o) => Number(o.id) === Number(pendiente.backendId));
+      const folio = Number(servidor?.folio_orden);
+      if (!Number.isSafeInteger(folio) || folio < 1001) continue;
+      await guardarOrdenLocal({
+        ...pendiente,
+        form: { ...pendiente.form, folio_orden: String(folio) }
+      });
+      await AsyncStorage.removeItem(clave);
+    } catch (error) {
+      console.warn('No se pudo reconciliar una orden pendiente:', error.message);
+    }
+  }
+};

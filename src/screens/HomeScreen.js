@@ -5,6 +5,7 @@ import {
 } from 'react-native';
 import axios from 'axios';
 import { API_URL } from '../services/api';
+import { reconciliarOrdenesPendientes } from '../services/ordenesLocales';
 
 export default function HomeScreen({ navigation }) {
   const [orders, setOrders] = useState([]);
@@ -21,6 +22,8 @@ export default function HomeScreen({ navigation }) {
       const items = Array.isArray(datos) ? datos
         : Array.isArray(datos?.ordenes) ? datos.ordenes
         : Array.isArray(datos?.data) ? datos.data : [];
+      try { await reconciliarOrdenesPendientes(items); }
+      catch (error) { console.warn('No se pudieron recuperar evidencias pendientes:', error.message); }
       setOrders(items);
       setErrorMensaje('');
     } catch (error) {

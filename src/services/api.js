@@ -4,7 +4,7 @@ export const API_URL = 'https://ordenes-servicio-jdej.onrender.com/api/ordenes';
 // El backend recibido en el proyecto solo tiene contrato conocido para estos campos.
 // No intentamos enviar fotografías ni firmas en JSON: necesitan almacenamiento y API propios.
 export const CAMPOS_BACKEND = [
-  'folio_orden', 'motivo_servicio', 'nombre_unidad_medica', 'direccion',
+  'motivo_servicio', 'nombre_unidad_medica', 'direccion',
   'ubicacion', 'contacto', 'no_contrato', 'tel_unidad', 'tel_responsable',
   'tiempo_garantia', 'equipo', 'marca', 'modelo', 'serie', 'inventario',
   'observaciones', 'observaciones_mtto_correctivo', 'tecnico_servicio',
@@ -14,9 +14,7 @@ export const CAMPOS_BACKEND = [
 export const prepararOrdenServidor = (form) => {
   const payload = {};
   CAMPOS_BACKEND.forEach((campo) => {
-    if (campo === 'folio_orden') {
-      payload[campo] = Number.parseInt(form.folio_orden, 10);
-    } else if (campo === 'marca') {
+    if (campo === 'marca') {
       // La API antigua tiene columnas separadas de marca/modelo.
       // Hasta actualizarla, conservamos el campo combinado en 'marca'.
       payload[campo] = form.marca_modelo?.trim() || form.marca || '';
@@ -29,6 +27,11 @@ export const prepararOrdenServidor = (form) => {
       payload[campo] = form[campo] ?? '';
     }
   });
+  // Compatibilidad con la API histórica, que aceptaba folio_orden = 0.
+  // PostgreSQL DEBE tener instalado el trigger de folio automático del SQL incluido.
+  // El trigger sustituye este valor por el folio oficial al insertar la orden.
+  // IMPORTANTE: nunca usar 0 en un PDF ni como folio definitivo.
+  payload.folio_orden = 0;
   return payload;
 };
 
@@ -67,3 +70,44 @@ export const MOTIVOS = [
   'Mtto. Preventivo',
   'Mtto. Correctivo'
 ];
+
+
+// Respuestas posibles de servidores Express: {folio_orden}, {orden:{...}},
+// {data:{...}}, o una lista con la orden creada. Jamás confundir ID con folio.
+export const folioDeRespuesta = (respuesta) => {
+  const cuerpo = respuesta?.data ?? respuesta;
+  const anidados = [cuerpo, cuerpo?.orden, cuerpo?.data,
+    cuerpo?.resultado, cuerpo?.result, cuerpo?.registro, cuerpo?.rows];
+  const posibles = anidados.flatMap((dato) => Array.isArray(dato) ? dato : [dato]);
+  for (const registro of posibles) {
+    const numero = Number(registro?.folio_orden);
+    if (Number.isSafeInteger(numero) && numero >= 1001) return numero;
+  }
+  return null;
+};
+
+export const idDeRespuesta = (respuesta) => {
+  const cuerpo = respuesta?.data ?? respuesta;
+  const anidados = [cuerpo, cuerpo?.orden, cuerpo?.data,
+    cuerpo?.resultado, cuerpo?.result, cuerpo?.registro, cuerpo?.rows];
+  const posibles = anidados.flatMap((dato) => Array.isArray(dato) ? dato : [dato]);
+  for (const registro of posibles) {
+    const id = Number(registro?.id);
+    if (Number.isSafeInteger(id) && id > 0) return id;
+  }
+  return null;
+};
+
+// La API ya admite GET para listar órdenes; úsalo únicamente cuando el POST
+// haya devuelto ID pero no folio. No se adivinan folios por fecha ni por máximo.
+export const buscarFolioPorId = async (axiosCliente, id) => {
+  if (!Number.isSafeInteger(id) || id <= 0) return null;
+  const respuesta = await axiosCliente.get(API_URL, { timeout: 30000 });
+  const cuerpo = respuesta?.data;
+  const registros = Array.isArray(cuerpo) ? cuerpo
+    : Array.isArray(cuerpo?.ordenes) ? cuerpo.ordenes
+    : Array.isArray(cuerpo?.data) ? cuerpo.data : [];
+  const orden = registros.find((item) => Number(item?.id) === id);
+  const folio = Number(orden?.folio_orden);
+  return Number.isSafeInteger(folio) && folio >= 1001 ? folio : null;
+};

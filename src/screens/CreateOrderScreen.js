@@ -6,8 +6,8 @@ import {
 import axios from 'axios';
 import * as ImagePicker from 'expo-image-picker';
 import SignatureCanvas from 'react-native-signature-canvas';
-import { API_URL, EMPRESAS, MOTIVOS, prepararOrdenServidor } from '../services/api';
-import { guardarFirma, guardarFoto, guardarOrdenLocal } from '../services/ordenesLocales';
+import { API_URL, EMPRESAS, MOTIVOS, prepararOrdenServidor, folioDeRespuesta, idDeRespuesta, buscarFolioPorId } from '../services/api';
+import { guardarFirma, guardarFoto, guardarOrdenLocal, guardarOrdenPendiente } from '../services/ordenesLocales';
 import { compartirPdfOrden } from '../services/pdfOrden';
 
 const FORM_INICIAL = {
@@ -47,11 +47,6 @@ export default function CreateOrderScreen({ navigation }) {
 
   const handleChange = (campo, texto) => {
     setForm((anterior) => ({ ...anterior, [campo]: texto }));
-  };
-
-  const cambiarFolio = (cantidad) => {
-    const actual = Number.parseInt(form.folio_orden, 10) || 0;
-    handleChange('folio_orden', String(Math.max(1, actual + cantidad)));
   };
 
   const seleccionarEmpresa = (id) => {
@@ -110,15 +105,13 @@ export default function CreateOrderScreen({ navigation }) {
     }
   };
 
-  const armarOrdenLocal = () => ({
-    form: { ...form, folio_orden: String(Number.parseInt(form.folio_orden, 10)) },
+  const armarOrdenLocal = (folio) => ({
+    form: { ...form, folio_orden: String(folio ?? form.folio_orden ?? '') },
     empresaId, logo, contactoEmpresa: { ...contactoEmpresa },
     fotosAntes, fotosDespues, firmaTecnico, firmaResponsable
   });
 
   const validar = () => {
-    const folio = Number(form.folio_orden);
-    if (!Number.isSafeInteger(folio) || folio <= 0) return 'Escribe un folio numérico válido.';
     if (!form.nombre_unidad_medica.trim() || !form.equipo.trim())
       return 'Completa la unidad médica y el equipo.';
     if (!form.tecnico_servicio.trim() || !form.responsable_unidad.trim())
@@ -132,39 +125,71 @@ export default function CreateOrderScreen({ navigation }) {
     return null;
   };
 
+
   const handleSubmit = async () => {
     if (ocupado || guardada) return;
     const problema = validar();
     if (problema) return Alert.alert('Falta información', problema);
     setOcupado(true);
+    let respuesta;
     try {
-      // El backend actual NO tiene endpoints para los campos nuevos.
-      // Se le envía exclusivamente el formulario antiguo para no romper su API.
-      await axios.post(API_URL, prepararOrdenServidor(form), { timeout: 30000 });
+      // El teléfono NO asigna folios a órdenes: debe hacerlo PostgreSQL.
+      // El SQL adjunto instala un trigger que sustituye el 0 heredado de la API.
+      respuesta = await axios.post(API_URL, prepararOrdenServidor(form), { timeout: 30000 });
     } catch (error) {
       setOcupado(false);
-      Alert.alert('No se pudo guardar en el servidor',
-        'La orden NO se registró en Render. Comprueba la conexión y la API antes de intentarlo otra vez.');
+      Alert.alert('No se pudo confirmar el guardado',
+        'Puede tratarse de un error de conexión o tiempo de espera. ' +
+        'Antes de pulsar Guardar otra vez, revisa la lista de órdenes para evitar duplicados.');
       return;
     }
+
+    // Nunca inventamos el folio a partir del máximo observado, ni del ID interno.
+    let folio = folioDeRespuesta(respuesta);
+    if (!folio) {
+      const id = idDeRespuesta(respuesta);
+      if (id) {
+        try { folio = await buscarFolioPorId(axios, id); }
+        catch (error) { console.warn('No se pudo consultar el folio asignado:', error.message); }
+      }
+    }
+    if (!folio) {
+      // POST ya respondió: NO repetirlo. Se conservan evidencias con un
+      // identificador temporal para poder recuperarlas cuando mejore la API.
+      try {
+        await guardarOrdenPendiente(armarOrdenLocal(''), idDeRespuesta(respuesta));
+      } catch (err) {
+        console.warn('No se pudieron conservar las evidencias pendientes:', err.message);
+      }
+      setGuardada(true);
+      setOcupado(false);
+      Alert.alert('Orden enviada, folio pendiente',
+        'El servidor respondió, pero no devolvió el folio asignado. ' +
+        'No repitas el envío. Comprueba la orden en el listado/pgAdmin. ' +
+        'Es necesario que la API devuelva id y folio_orden para emitir su PDF.');
+      return;
+    }
+
     try {
-      await guardarOrdenLocal(armarOrdenLocal());
+      const numero = String(folio);
+      setForm((anterior) => ({ ...anterior, folio_orden: numero }));
+      await guardarOrdenLocal(armarOrdenLocal(numero));
       setGuardada(true);
       Alert.alert('Orden guardada',
-        'Los datos compatibles se guardaron en el servidor. Los nuevos campos, firmas, fotos, empresa y datos de contacto quedan completos SOLO en este teléfono hasta adaptar la API. Ya puedes compartir el PDF.');
+        `Folio asignado automáticamente: ${numero}. Ya puedes generar y compartir el PDF. ` +
+        'Las firmas y fotografías aún se conservan solo en este dispositivo.');
     } catch (error) {
-      // La API ya respondió; un nuevo POST podría duplicar la orden.
+      // La API ya guardó la orden; no debemos permitir un segundo POST.
       setGuardada(true);
       Alert.alert('Guardado parcial',
-        'La orden se guardó en el servidor, pero falló el registro local de evidencias: ' + error.message +
-        '. No vuelvas a presionar Guardar para evitar duplicados.');
+        `El servidor asignó el folio ${folio}, pero falló el registro local de evidencias: ` +
+        error.message + '. NO vuelvas a enviar la orden.');
     } finally {
       setOcupado(false);
     }
   };
-
   const compartir = async () => {
-    if (!guardada || ocupado) return;
+    if (!guardada || ocupado || !form.folio_orden) return;
     setOcupado(true);
     try {
       await compartirPdfOrden(armarOrdenLocal());
@@ -263,24 +288,9 @@ export default function CreateOrderScreen({ navigation }) {
         <Text style={styles.sectionTitle}>Datos generales</Text>
         <View style={styles.dosColumnas}>
           <View style={styles.columna}>
-            <Text style={styles.etiqueta}>No. de folio *</Text>
+            <Text style={styles.etiqueta}>No. de folio</Text>
             <View style={styles.controlFolio}>
-              <TextInput
-                style={styles.inputFolio} placeholder="1004"
-                keyboardType="number-pad" value={form.folio_orden}
-                onChangeText={(t) => handleChange('folio_orden', t.replace(/[^0-9]/g, ''))}
-                editable={!guardada && !ocupado}
-              />
-              <View style={styles.flechas}>
-                <TouchableOpacity accessibilityLabel="Aumentar folio" style={styles.flecha}
-                  onPress={() => cambiarFolio(1)} disabled={guardada || ocupado}>
-                  <Text style={styles.flechaTexto}>▲</Text>
-                </TouchableOpacity>
-                <TouchableOpacity accessibilityLabel="Disminuir folio" style={styles.flecha}
-                  onPress={() => cambiarFolio(-1)} disabled={guardada || ocupado}>
-                  <Text style={styles.flechaTexto}>▼</Text>
-                </TouchableOpacity>
-              </View>
+              <Text style={styles.inputFolioTexto}>{form.folio_orden || 'Automático al guardar'}</Text>
             </View>
           </View>
           <View style={styles.columna}>
@@ -344,7 +354,7 @@ export default function CreateOrderScreen({ navigation }) {
         {renderFirma('Firma del responsable *', 'responsable', firmaResponsable)}
 
         <View style={styles.nota}>
-          <Text style={styles.notaTexto}>IMPORTANTE: la API antigua recibe los campos habituales. Reporte, material y refacciones, pruebas eléctricas, simulador y los datos empresariales se guardan SOLO en este teléfono, al igual que fotos y firmas. Recomendaciones se envía al campo antiguo de mantenimiento correctivo; Marca y Modelo se envía al campo antiguo de marca. Falta adaptar el backend para sincronizarlos correctamente.</Text>
+          <Text style={styles.notaTexto}>IMPORTANTE: los folios oficiales se asignan por PostgreSQL al guardar. La API antigua recibe los campos habituales. Reporte, material y refacciones, pruebas eléctricas, simulador y los datos empresariales se guardan SOLO en este teléfono, al igual que fotos y firmas. Recomendaciones se envía al campo antiguo de mantenimiento correctivo; Marca y Modelo se envía al campo antiguo de marca. Falta adaptar el backend para sincronizarlos correctamente.</Text>
         </View>
         {ocupado && <ActivityIndicator size="large" color="#2563a6" style={{ margin: 12 }} />}
         {!guardada ? (
@@ -354,10 +364,16 @@ export default function CreateOrderScreen({ navigation }) {
           </TouchableOpacity>
         ) : (
           <>
-            <Text style={styles.exito}>✓ Orden enviada al servidor. Lista para entregar copia.</Text>
-            <TouchableOpacity style={styles.botonPrincipal} onPress={compartir} disabled={ocupado}>
-              <Text style={styles.botonPrincipalTexto}>Compartir copia PDF con cliente</Text>
-            </TouchableOpacity>
+            {form.folio_orden ? (
+              <>
+                <Text style={styles.exito}>✓ Orden #{form.folio_orden} guardada. Lista para entregar copia.</Text>
+                <TouchableOpacity style={styles.botonPrincipal} onPress={compartir} disabled={ocupado}>
+                  <Text style={styles.botonPrincipalTexto}>Compartir copia PDF con cliente</Text>
+                </TouchableOpacity>
+              </>
+            ) : (
+              <Text style={styles.aviso}>Orden enviada, pero sin folio confirmado por la API. No se generará un PDF con número inventado. Consulta el registro en pgAdmin.</Text>
+            )}
             <TouchableOpacity style={styles.secundario} onPress={() => navigation.goBack()}>
               <Text style={styles.secundarioTexto}>Volver al listado</Text>
             </TouchableOpacity>
@@ -435,6 +451,7 @@ const styles = StyleSheet.create({
   columna: { flex: 1 },
   controlFolio: { flexDirection: 'row', alignItems: 'stretch', borderColor: '#a1c7ff', borderWidth: 1, borderRadius: 8, backgroundColor: '#fff', minHeight: 47 },
   inputFolio: { flex: 1, paddingHorizontal: 10, color: '#18283c', minWidth: 0 },
+  inputFolioTexto: { flex: 1, paddingHorizontal: 10, paddingVertical: 12, color: '#18283c', fontSize: 12 },
   flechas: { borderLeftWidth: 1, borderColor: '#cbd5e1', width: 34 },
   flecha: { flex: 1, alignItems: 'center', justifyContent: 'center' },
   flechaTexto: { fontSize: 10, color: '#334155' },

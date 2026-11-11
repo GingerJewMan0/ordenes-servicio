@@ -5,7 +5,7 @@ import {
 } from 'react-native';
 import * as FileSystem from 'expo-file-system';
 import { EMPRESAS } from '../services/api';
-import { eliminarViatico, guardarViatico, listarViaticos } from '../services/viaticosLocal';
+import { eliminarViatico, guardarViatico, listarViaticos, reservarFolioViatico } from '../services/viaticosLocal';
 import { compartirPdfViaticos, generarPdfViaticos } from '../services/pdfViaticos';
 
 const RUBROS = [
@@ -64,6 +64,8 @@ function Campo({ titulo, valor, cambio, multiline = false, teclado = 'default', 
 
 export default function ViaticosScreen() {
   const desplazamiento = useRef(null);
+  const guardadoEnCurso = useRef(false);
+  const folioReservado = useRef(null);
   const [form, setForm] = useState(formularioVacio);
   const [editarId, setEditarId] = useState(null);
   const [creadoEn, setCreadoEn] = useState(null);
@@ -96,7 +98,6 @@ export default function ViaticosScreen() {
   const total = hayImporteInvalido ? null : Object.values(importes).reduce((suma, valor) => suma + valor, 0);
 
   const validar = () => {
-    if (!form.folio.trim()) return 'Escribe un folio para la solicitud.';
     if (!form.empleado.trim()) return 'Escribe el nombre del empleado.';
     if (!form.destino.trim()) return 'Escribe el destino del viaje.';
     if (!form.motivo.trim()) return 'Describe el motivo de la comisión.';
@@ -104,18 +105,15 @@ export default function ViaticosScreen() {
       return 'Escribe las fechas con el formato AAAA-MM-DD y verifica que existan.';
     if (form.fechaFin < form.fechaInicio) return 'La fecha de regreso no puede ser anterior a la salida.';
     if (hayImporteInvalido) return 'Revisa los importes. Usa números positivos, sin separador de miles y máximo 2 decimales.';
-    if (historial.some((item) => item.id !== editarId && item.empresaId === form.empresaId &&
-      String(item.folio).trim().toLowerCase() === form.folio.trim().toLowerCase()))
-      return 'Ya existe una solicitud con ese folio para esta empresa.';
     return null;
   };
 
-  const construirSolicitud = () => ({
+  const construirSolicitud = (folioAsignado) => ({
     id: editarId || `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
     creadoEn: creadoEn || new Date().toISOString(),
     actualizadoEn: new Date().toISOString(),
     empresaId: form.empresaId,
-    folio: form.folio.trim(),
+    folio: folioAsignado,
     empleado: form.empleado.trim(),
     destino: form.destino.trim(),
     fechaInicio: form.fechaInicio,
@@ -128,6 +126,7 @@ export default function ViaticosScreen() {
   });
 
   const nuevo = () => {
+    folioReservado.current = null;
     setForm(formularioVacio());
     setEditarId(null);
     setCreadoEn(null);
@@ -135,18 +134,22 @@ export default function ViaticosScreen() {
   };
 
   const guardar = async (conPdf) => {
-    if (ocupado) return;
+    if (ocupado || guardadoEnCurso.current) return;
     const error = validar();
     if (error) { Alert.alert('Revisa la solicitud', error); return; }
+    guardadoEnCurso.current = true;
     setOcupado(true);
     try {
-      const solicitud = construirSolicitud();
+      const folioAsignado = editarId ? form.folio : (folioReservado.current || await reservarFolioViatico());
+      if (!editarId) folioReservado.current = folioAsignado;
+      const solicitud = construirSolicitud(folioAsignado);
       let uri = null;
       if (conPdf) {
         uri = await generarPdfViaticos(solicitud);
         solicitud.pdfUri = uri;
       }
       await guardarViatico(solicitud);
+      setForm((anterior) => ({ ...anterior, folio: solicitud.folio }));
       setEditarId(solicitud.id);
       setCreadoEn(solicitud.creadoEn);
       setHistorial(await listarViaticos());
@@ -162,11 +165,13 @@ export default function ViaticosScreen() {
     } catch (errorGuardar) {
       Alert.alert('No se pudo guardar el viático', errorGuardar.message);
     } finally {
+      guardadoEnCurso.current = false;
       setOcupado(false);
     }
   };
 
   const editar = (item) => {
+    folioReservado.current = null;
     setEditarId(item.id);
     setCreadoEn(item.creadoEn);
     setForm({
@@ -234,7 +239,12 @@ export default function ViaticosScreen() {
         {empresaSeleccionada?.logo ? (
           <Image style={styles.logo} source={typeof empresaSeleccionada.logo === 'number' ? empresaSeleccionada.logo : { uri: empresaSeleccionada.logo }} resizeMode="contain" />
         ) : null}
-        <Campo titulo="Folio de viáticos" valor={form.folio} cambio={(v) => actualizar('folio', v)} placeholder="Ejemplo: V-0001" />
+        <View style={styles.campo}>
+          <Text style={styles.etiqueta}>Folio de viáticos</Text>
+          <View style={styles.entrada}>
+            <Text style={{ color: '#173753' }}>{form.folio || folioReservado.current || 'Automático al guardar'}</Text>
+          </View>
+        </View>
         <Campo titulo="Nombre del empleado / técnico" valor={form.empleado} cambio={(v) => actualizar('empleado', v)} />
         <Campo titulo="Destino" valor={form.destino} cambio={(v) => actualizar('destino', v)} placeholder="Ciudad o unidad médica" />
         <View style={styles.fechas}>
