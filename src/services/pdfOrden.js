@@ -1,5 +1,7 @@
 import * as FileSystem from 'expo-file-system';
 import { Asset } from 'expo-asset';
+import { Image } from 'react-native';
+import { LOGOS_PDF } from './logosPdfBase64';
 import * as Print from 'expo-print';
 import * as Sharing from 'expo-sharing';
 import {
@@ -22,32 +24,59 @@ const dato = (titulo, valor) =>
 const bloque = (titulo, valor, fallback = 'Sin información registrada') =>
   `<section class="bloque"><h2>${escapar(titulo)}</h2><div class="observ">${texto(valor, fallback)}</div></section>`;
 
+// Lee fotos y firmas almacenadas en el teléfono y activos incluidos en el APK.
+// En ciertos APK Release, el logo empaquetado no tiene un localUri file:// legible.
+// Si ocurre, intentamos copiar el recurso a la caché antes de convertirlo a Base64.
 const aDataUri = async (origen) => {
   if (!origen) return null;
+  if (typeof origen === 'string' && /^data:image\/(png|jpeg|jpg|webp);base64,/i.test(origen)) {
+    return origen;
+  }
+
+  let tipoAsset = '';
+  let candidatos = [];
   try {
-    // Un require('...png') de React Native produce un identificador numérico.
-    // Expo Asset permite leer la imagen incluida en el APK y convertirla a base64.
-    let uri = origen;
-    let tipoAsset = '';
     if (typeof origen === 'number') {
       const asset = Asset.fromModule(origen);
-      await asset.downloadAsync();
-      uri = asset.localUri;
-      tipoAsset = asset.type || '';
+      const preparado = await asset.downloadAsync();
+      tipoAsset = preparado.type || asset.type || '';
+      const source = Image.resolveAssetSource(origen);
+      candidatos = [preparado.localUri, preparado.uri, source?.uri];
+    } else if (typeof origen === 'string') {
+      candidatos = [origen];
+    } else if (typeof origen?.uri === 'string') {
+      candidatos = [origen.uri];
     }
-    if (!uri || typeof uri !== 'string') return null;
-    const info = await FileSystem.getInfoAsync(uri);
-    if (!info.exists) return null;
-    const b64 = await FileSystem.readAsStringAsync(uri, {
-      encoding: FileSystem.EncodingType.Base64
-    });
-    const esPng = tipoAsset === 'png' || /\.png(?:$|\?)/i.test(uri);
-    const tipo = esPng ? 'image/png' : 'image/jpeg';
-    return `data:${tipo};base64,${b64}`;
+
+    for (const candidato of [...new Set(candidatos.filter(Boolean))]) {
+      let ruta = candidato;
+      try {
+        // La lectura directa es válida para fotos/firmas y recursos extraídos.
+        // Algunas rutas internas de Android no son accesibles a getInfoAsync.
+        if (!ruta.startsWith('file://') && !ruta.startsWith('content://')) {
+          const extension = /jpe?g/i.test(tipoAsset) ? 'jpg' : 'png';
+          const temporal = `${FileSystem.cacheDirectory}logo-pdf-${Date.now()}-${Math.random().toString(36).slice(2)}.${extension}`;
+          await FileSystem.copyAsync({ from: ruta, to: temporal });
+          ruta = temporal;
+        }
+        const info = await FileSystem.getInfoAsync(ruta);
+        if (!info.exists) continue;
+        const b64 = await FileSystem.readAsStringAsync(ruta, {
+          encoding: FileSystem.EncodingType.Base64
+        });
+        if (!b64) continue;
+        const esPng = tipoAsset === 'png' || /\.png(?:$|[?#])/i.test(ruta);
+        const esWebp = tipoAsset === 'webp' || /\.webp(?:$|[?#])/i.test(ruta);
+        const mime = esPng ? 'image/png' : esWebp ? 'image/webp' : 'image/jpeg';
+        return `data:${mime};base64,${b64}`;
+      } catch (error) {
+        console.warn('No se pudo leer un origen de imagen para PDF:', error?.message || error);
+      }
+    }
   } catch (error) {
-    console.warn('No fue posible leer imagen para PDF:', error);
-    return null;
+    console.warn('No se pudo cargar la imagen para PDF:', error?.message || error);
   }
+  return null;
 };
 
 const cuadriculaFotos = (titulo, fotos) => `
@@ -70,7 +99,9 @@ export const generarPdfOrden = async (orden) => {
   const firmaResponsable = await aDataUri(orden.firmaResponsable);
 
   const uriLogo = orden.logo || (orden.empresaId ? await cargarLogo(orden.empresaId) : null);
-  const logo = await aDataUri(uriLogo);
+  // Preferimos los logos preconvertidos: se generan una vez desde assets/logos/
+  // y son fiables incluso cuando Android no expone los recursos del APK como archivos.
+  const logo = LOGOS_PDF[orden.empresaId] || await aDataUri(uriLogo);
   const contacto = orden.contactoEmpresa || (orden.empresaId
     ? await cargarContactoEmpresa(orden.empresaId)
     : { direccion: '', telefono: '', email: '' });
@@ -85,7 +116,7 @@ export const generarPdfOrden = async (orden) => {
     throw new Error('Faltan archivos locales de firmas. No se generó una copia incompleta.');
   }
   if (uriLogo && !logo) {
-    throw new Error('No se pudo leer el logo de la empresa. Revisa assets/logos/ y src/services/api.js.');
+    throw new Error('No se pudo leer el logo para el PDF. Ejecuta: node scripts/prepararLogosPdf.cjs (desde la raíz del proyecto), recompila el APK y vuelve a compartir esta misma orden.');
   }
 
   const empresa = nombreEmpresa(orden.empresaId);
