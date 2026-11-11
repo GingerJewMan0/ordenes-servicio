@@ -6,7 +6,7 @@ const express = require('express');
 const RUBROS = ['casetas', 'estacionamiento', 'gasolina', 'hospedaje', 'comida', 'refacciones', 'material', 'otros'];
 const CAMPOS = ['empresa_id', 'empleado', 'destino', 'fecha_inicio', 'fecha_fin', 'orden_relacionada', 'motivo', 'observaciones', ...RUBROS];
 const COLUMNAS = ['id','folio','client_request_id', ...CAMPOS,'total','creado_en','actualizado_en','eliminado_en'].join(', ');
-const DIAS_COLUMNAS = ['viatico_id','fecha','hospitales',...RUBROS];
+const DIAS_COLUMNAS = ['viatico_id','fecha','hospitales','proyecto',...RUBROS];
 const texto = (v, largo) => String(v ?? '').trim().slice(0, largo);
 const yyyyMMdd = (v) => v instanceof Date ? v.toISOString().slice(0,10) : String(v).slice(0,10);
 const esFecha = (v) => /^\d{4}-\d{2}-\d{2}$/.test(String(v)) &&
@@ -27,13 +27,13 @@ function validar(body) {
     const e = new Error('Datos inválidos.'); e.status = 400; throw e;
   }
   const d = {
-    empresa_id: texto(body.empresaId,30), empleado: texto(body.empleado,180),
+    empresa_id: texto(body.empresaId,30) || 'general', empleado: texto(body.empleado,180),
     destino: texto(body.destino,250), fecha_inicio: texto(body.fechaInicio,10),
     fecha_fin: texto(body.fechaFin,10), orden_relacionada: texto(body.ordenRelacionada,50),
     motivo: texto(body.motivo,4000), observaciones: texto(body.observaciones,4000)
   };
   const mal = (mensaje) => { const error = new Error(mensaje); error.status = 400; throw error; };
-  if (!['opciones','mexus'].includes(d.empresa_id)) mal('Empresa inválida.');
+  if (!['opciones','mexus','general'].includes(d.empresa_id)) mal('Empresa inválida.');
   if (!d.empleado || !d.destino || !d.motivo) mal('Completa empleado, destino y motivo.');
   if (!esFecha(d.fecha_inicio) || !esFecha(d.fecha_fin) || d.fecha_fin < d.fecha_inicio) mal('Fechas inválidas.');
   let dias = null;
@@ -46,7 +46,7 @@ function validar(body) {
       const fecha = texto(item?.fecha,10);
       if (!esFecha(fecha) || fecha < d.fecha_inicio || fecha > finalSemana || fechasVistas.has(fecha)) mal('Días repetidos o fuera de la semana seleccionada.');
       fechasVistas.add(fecha);
-      return { fecha, hospitales: texto(item?.hospitales,500),
+      return { fecha, hospitales: texto(item?.hospitales,500), proyecto: texto(item?.proyecto,500),
         gastos: Object.fromEntries(RUBROS.map(r=>[r, importe(item?.gastos?.[r], `${r} (${fecha})`)])) };
     }).sort((a,b)=>a.fecha.localeCompare(b.fecha));
     for (let i=0;i<5;i++) if (!fechasVistas.has(fechaMasDias(d.fecha_inicio,i))) mal('Lunes a viernes deben aparecer en el desglose.');
@@ -67,7 +67,7 @@ function presentar(fila, dias) {
     observaciones:fila.observaciones,gastos,total:Number(fila.total),
     dias:dias||[],creadoEn:fila.creado_en,actualizadoEn:fila.actualizado_en,origen:'servidor' };
 }
-const presentarDia = (fila) => ({ fecha:yyyyMMdd(fila.fecha), hospitales:fila.hospitales,
+const presentarDia = (fila) => ({ fecha:yyyyMMdd(fila.fecha), hospitales:fila.hospitales, proyecto:fila.proyecto || '',
   gastos:Object.fromEntries(RUBROS.map(r=>[r,Number(fila[r])])) });
 async function leerDias(client, ids) {
   const m = new Map();
@@ -86,18 +86,29 @@ async function guardarDias(client, id, dias) {
   await client.query('DELETE FROM public.viaticos_dias WHERE viatico_id = $1',[id]);
   if (!dias) return;
   for (const dia of dias) {
-    const valores = [id,dia.fecha,dia.hospitales,...RUBROS.map(r=>dia.gastos[r])];
+    const valores = [id,dia.fecha,dia.hospitales,dia.proyecto,...RUBROS.map(r=>dia.gastos[r])];
     await client.query(`INSERT INTO public.viaticos_dias (${DIAS_COLUMNAS.join(',')}) VALUES (${valores.map((_,i)=>`$${i+1}`).join(',')})`,valores);
   }
 }
 module.exports = function crearRouterViaticos(pool) {
   const router = express.Router();
   router.use(express.json({limit:'100kb'}));
+  // Registro técnico: no incluye nombres, importes, fotografías ni cuerpos JSON.
+  router.use((req,res,next)=>{
+    const inicio=Date.now();
+    res.on('finish',()=>console.log(`[viaticos] ${req.method} ${req.path} HTTP ${res.statusCode} ${Date.now()-inicio}ms`));
+    next();
+  });
   const errorHTTP = (res,e) => {
     if (e.status) return res.status(e.status).json({error:e.message});
     if (e.code === '23505') return res.status(409).json({error:'Folio o identificador duplicado.'});
-    if (e.code === '42P01') return res.status(503).json({error:'Falta ejecutar la migración SQL de viáticos semanales.'});
-    console.error('Error viáticos:',e);
+    if (e.code === '42P01' || e.code === '42703') return res.status(503).json({error:'La estructura PostgreSQL no coincide con el backend. Comprueba las migraciones.'});
+    if (['08000','08003','08006','57P01','53300','ECONNREFUSED','ETIMEDOUT'].includes(e.code)) {
+      console.error('Fallo de conexión de viáticos a PostgreSQL:',e.code);
+      return res.status(503).json({error:'No se pudo conectar con PostgreSQL. Comprueba el estado de Render.'});
+    }
+    // No registrar datos personales ni el cuerpo de la solicitud.
+    console.error('Error interno de viáticos:',{codigo:e.code||'SIN_CODIGO',nombre:e.name||'Error'});
     return res.status(500).json({error:'Error del servidor al guardar o consultar viáticos.'});
   };
   router.get('/',async (_req,res)=>{
@@ -107,9 +118,22 @@ module.exports = function crearRouterViaticos(pool) {
       res.json({viaticos:rows.map(r=>presentar(r,dias.get(String(r.id))||[]))});
     } catch(e) { errorHTTP(res,e); }
   });
+  // Verificar si un POST quedó guardado cuando la respuesta se perdió.
+  // El identificador no se reutiliza entre solicitudes distintas.
+  router.get('/solicitud/:identificador',async(req,res)=>{
+    try{
+      const identificador=texto(req.params.identificador,100);
+      if(!/^[A-Za-z0-9_-]{8,100}$/.test(identificador))return res.status(400).json({error:'Identificador de solicitud inválido.'});
+      const {rows}=await pool.query(`SELECT ${COLUMNAS} FROM public.viaticos WHERE client_request_id=$1 AND eliminado_en IS NULL LIMIT 1`,[identificador]);
+      if(!rows.length)return res.status(404).json({error:'Aún no se encontró esta solicitud.'});
+      const dias=await leerDias(pool,[rows[0].id]);
+      return res.json({viatico:presentar(rows[0],dias.get(String(rows[0].id))||[])});
+    }catch(e){errorHTTP(res,e);}
+  });
   router.post('/',async (req,res)=>{
-    const client=await pool.connect();
+    let client;
     try {
+      client=await pool.connect();
       const {datos,dias}=validar(req.body);
       const peticion=texto(req.body.clientRequestId,100);
       if (!/^[A-Za-z0-9_-]{8,100}$/.test(peticion)) { const e=new Error('Identificador de solicitud inválido.');e.status=400;throw e; }
@@ -127,11 +151,12 @@ module.exports = function crearRouterViaticos(pool) {
       const agrupados=await leerDias(client,[fila.id]);
       await client.query('COMMIT');
       res.status(insert.rows.length?201:200).json({viatico:presentar(fila,agrupados.get(String(fila.id))||[]),repetido:!insert.rows.length});
-    } catch(e){await client.query('ROLLBACK').catch(()=>{}); errorHTTP(res,e);} finally{client.release();}
+    } catch(e){if(client)await client.query('ROLLBACK').catch(()=>{}); errorHTTP(res,e);} finally{client?.release();}
   });
   router.put('/:id',async (req,res)=>{
-    const client=await pool.connect();
+    let client;
     try {
+      client=await pool.connect();
       const id=String(req.params.id);
       if (!/^\d+$/.test(id)) {const e=new Error('Identificador inválido.');e.status=400;throw e;}
       const {datos,dias}=validar(req.body);
@@ -148,7 +173,7 @@ module.exports = function crearRouterViaticos(pool) {
       const agrupados=await leerDias(client,[id]);
       await client.query('COMMIT');
       res.json({viatico:presentar(rows[0],agrupados.get(String(id))||[])});
-    } catch(e){await client.query('ROLLBACK').catch(()=>{}); errorHTTP(res,e);} finally{client.release();}
+    } catch(e){if(client)await client.query('ROLLBACK').catch(()=>{}); errorHTTP(res,e);} finally{client?.release();}
   });
   router.delete('/:id',async(req,res)=>{
     try {

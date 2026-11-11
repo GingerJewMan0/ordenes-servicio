@@ -1,34 +1,41 @@
 import axios from 'axios';
-import { API_URL } from './api';
 
-// Se aloja en el MISMO backend que ya responde /api/ordenes.
-export const API_VIATICOS_URL = API_URL.replace(/\/api\/ordenes\/?$/, '/api/viaticos');
-if (API_VIATICOS_URL === API_URL) {
-  console.warn('No se pudo derivar la URL de viáticos a partir de API_URL.');
-}
+// Backend de viáticos independiente de la URL de órdenes de servicio.
+export const API_VIATICOS_URL = 'https://ordenes-viaticos-test.onrender.com/api/viaticos';
 
-const cliente = axios.create({ timeout: 30000 });
+// Render Free puede tardar más de 30 s en reactivarse.
+// No se reintenta automáticamente un POST: podría haberse guardado.
+const cliente = axios.create({ timeout: 90000 });
+
 const unwrap = (respuesta) => {
   const fila = respuesta?.data?.viatico;
   if (!fila?.id || !/^V-\d+$/.test(String(fila.folio || ''))) {
-    throw new Error('La API no confirmó el ID y el folio del viático. Consulta PostgreSQL antes de repetir el envío.');
+    throw new Error('La API no confirmó el ID y folio. Consulta PostgreSQL antes de volver a enviar.');
   }
   return fila;
 };
 
+// La ausencia de una respuesta HTTP no confirma si el servidor guardó o no.
+export const esGuardadoIncierto = (error) =>
+  !error?.response || Number(error.response.status) >= 500;
+
 export const explicarErrorViaticos = (error) => {
-  if (error?.response?.status === 404) {
-    return 'La API /api/viaticos aún no existe en Render. Primero instala y despliega la ruta del backend incluida en el ZIP.';
+  const status = error?.response?.status;
+  const mensaje = error?.response?.data?.error;
+  if (typeof mensaje === 'string' && mensaje.trim()) {
+    return `Servidor HTTP ${status}: ${mensaje}`;
   }
-  if (error?.response?.data?.error) return String(error.response.data.error);
-  if (error?.code === 'ECONNABORTED') {
-    return 'La API tardó demasiado. El guardado podría haberse completado; revisa el historial en PostgreSQL antes de repetirlo.';
+  if (status === 404) return 'El viático solicitado o la ruta de la API no existe (HTTP 404).';
+  if (status === 409) return 'El servidor encontró un conflicto (HTTP 409). Comprueba el historial antes de repetir el envío.';
+  if (status >= 400 && status < 500) return `El servidor rechazó los datos (HTTP ${status}).`;
+  if (error?.code === 'ECONNABORTED' || /timeout/i.test(error?.message || '')) {
+    return 'Se agotó el tiempo de espera (90 s). El servidor podría haber guardado los datos. Verifica el último envío antes de repetirlo.';
   }
-  if (error?.message?.startsWith('La API devolvió')) return error.message;
-  if (error?.response?.status >= 500 || !error?.response) {
-    return 'No se confirmó el guardado en PostgreSQL. Comprueba la conexión y el historial antes de volver a enviar.';
+  if (!error?.response) {
+    return `Sin confirmación de red (${error?.code || 'sin código'}). Revisa el historial y usa «Comprobar último envío» antes de reintentar.`;
   }
-  return error?.message || 'No se pudo conectar con el servidor de viáticos.';
+  if (status >= 500) return `El servidor devolvió HTTP ${status}. Consulta los Logs de ordenes-viaticos-test y comprueba el historial.`;
+  return error?.message || 'No se pudo confirmar la operación con PostgreSQL.';
 };
 
 export const listarViaticosServidor = async () => {
@@ -40,6 +47,13 @@ export const listarViaticosServidor = async () => {
 
 export const crearViaticoServidor = async (solicitud, clientRequestId) => {
   const respuesta = await cliente.post(API_VIATICOS_URL, { ...solicitud, clientRequestId });
+  return unwrap(respuesta);
+};
+
+// Consulta segura para comprobar un POST cuyo resultado no llegó al teléfono.
+// El identificador de la solicitud se reutiliza si el usuario decide reintentar.
+export const comprobarViaticoPorSolicitud = async (clientRequestId) => {
+  const respuesta = await cliente.get(`${API_VIATICOS_URL}/solicitud/${encodeURIComponent(String(clientRequestId))}`);
   return unwrap(respuesta);
 };
 
