@@ -3,6 +3,7 @@ const { Pool } = require('pg');
 const cors = require('cors');
 const path = require('path');
 const crearRouterViaticos = require('./routes/viaticos');
+const { crearSeguridad } = require('./security/sesiones');
 require('dotenv').config();
 
 const app = express();
@@ -16,6 +17,17 @@ const pool = new Pool({
 app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
+
+// Login y permisos. Montar ANTES de las rutas de órdenes y viáticos.
+// TRANSICIÓN: APP_AUTH_REQUIRED=false mantiene los APK actuales funcionando.
+// PRODUCCIÓN: activar true solamente cuando ambos servicios y teléfonos estén actualizados.
+app.set('trust proxy', 1); // Render: acceso desde un proxy inverso.
+const seguridad = crearSeguridad(pool);
+app.use('/api/auth', seguridad.router);
+app.use('/api/ordenes', seguridad.requerirSesion);
+app.use('/api/viaticos', seguridad.requerirSesion);
+// El resto de operaciones permite rol técnico; eliminación de viáticos solo admin.
+app.delete('/api/viaticos/:id', seguridad.soloAdmin);
 
 // Obtener todas las órdenes de servicio
 app.get('/api/ordenes', async (req, res) => {
