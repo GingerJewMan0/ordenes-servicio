@@ -3,6 +3,7 @@ const { Pool } = require('pg');
 const cors = require('cors');
 const path = require('path');
 require('dotenv').config();
+const { crearSeguridad } = require('./security/sesiones');
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -15,6 +16,15 @@ const pool = new Pool({
 app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
+
+// Los dos servicios comparten las tablas app_usuarios y app_sesiones
+// del mismo PostgreSQL. Dejar false durante las pruebas de migracion.
+// Con APP_AUTH_REQUIRED=true se exigira Bearer token en las rutas.
+app.set('trust proxy', 1); // Render usa un proxy inverso.
+const seguridad = crearSeguridad(pool);
+app.use('/api/auth', seguridad.router);
+app.use('/api/ordenes', seguridad.requerirSesion);
+
 
 // Obtener todas las órdenes de servicio
 app.get('/api/ordenes', async (req, res) => {
