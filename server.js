@@ -45,7 +45,9 @@ const CAMPOS_EDITABLES = Object.freeze([
   'ubicacion', 'contacto', 'no_contrato', 'tel_unidad', 'tel_responsable',
   'tiempo_garantia', 'equipo', 'marca', 'modelo', 'serie', 'inventario',
   'observaciones', 'observaciones_mtto_correctivo', 'tecnico_servicio',
-  'responsable_unidad'
+  'responsable_unidad',
+  // Datos del informe técnico que antes existían únicamente en el dispositivo.
+  'reporte', 'material_refacciones', 'pruebas_electricas', 'simulador'
 ]);
 const CAMPOS_PERMITIDOS = new Set(CAMPOS_EDITABLES);
 
@@ -86,7 +88,8 @@ app.post('/api/ordenes', async (req, res) => {
     empresa, folio_orden, motivo_servicio, nombre_unidad_medica, direccion,
     ubicacion, contacto, no_contrato, tel_unidad, tel_responsable,
     tiempo_garantia, equipo, marca, modelo, serie, inventario,
-    observaciones, observaciones_mtto_correctivo, tecnico_servicio, responsable_unidad
+    observaciones, observaciones_mtto_correctivo, tecnico_servicio, responsable_unidad,
+    reporte, material_refacciones, pruebas_electricas, simulador
   } = req.body || {};
   let cliente;
   try {
@@ -97,15 +100,17 @@ app.post('/api/ordenes', async (req, res) => {
         empresa, folio_orden, motivo_servicio, nombre_unidad_medica, direccion,
         ubicacion, contacto, no_contrato, tel_unidad, tel_responsable,
         tiempo_garantia, equipo, marca, modelo, serie, inventario,
-        observaciones, observaciones_mtto_correctivo, tecnico_servicio, responsable_unidad, fecha
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, NOW())
+        observaciones, observaciones_mtto_correctivo, tecnico_servicio, responsable_unidad,
+        reporte, material_refacciones, pruebas_electricas, simulador, fecha
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, NOW())
       RETURNING *`;
     const values = [
       empresa || 'Mexus Hospitalaria, S.A. de C.V.', folio_orden, motivo_servicio,
       nombre_unidad_medica, direccion, ubicacion, contacto, no_contrato,
       tel_unidad, tel_responsable, tiempo_garantia, equipo, marca, modelo,
       serie, inventario, observaciones, observaciones_mtto_correctivo,
-      tecnico_servicio, responsable_unidad
+      tecnico_servicio, responsable_unidad,
+      reporte ?? null, material_refacciones ?? null, pruebas_electricas ?? null, simulador ?? null
     ];
     const {rows} = await cliente.query(query, values);
     await registrarAuditoria(cliente, req, {
