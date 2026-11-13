@@ -4,6 +4,7 @@ const cors = require('cors');
 const path = require('path');
 const crearRouterViaticos = require('./routes/viaticos');
 const { crearSeguridad } = require('./security/sesiones');
+const { crearRouterAdminUsuarios } = require('./routes/adminUsuarios');
 require('dotenv').config();
 
 const app = express();
@@ -24,6 +25,9 @@ app.use(express.static(path.join(__dirname, 'public')));
 app.set('trust proxy', 1); // Render: acceso desde un proxy inverso.
 const seguridad = crearSeguridad(pool);
 app.use('/api/auth', seguridad.router);
+// Administración protegida SIEMPRE: requiere token y rol admin aunque otras
+// rutas se encuentren temporalmente con APP_AUTH_REQUIRED=false.
+app.use('/api/admin/usuarios', seguridad.verificarSesionSiempre, crearRouterAdminUsuarios(pool));
 app.use('/api/ordenes', seguridad.requerirSesion);
 app.use('/api/viaticos', seguridad.requerirSesion);
 // El resto de operaciones permite rol técnico; eliminación de viáticos solo admin.

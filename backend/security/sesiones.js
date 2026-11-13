@@ -114,7 +114,7 @@ function crearSeguridad(pool) {
       res.json({sesionCerrada: true});
     } catch (err) { error(res, err, 'logout'); }
   });
-  return {router, requerirSesion, soloAdmin};
+  return {router, requerirSesion, soloAdmin, verificarSesionSiempre: autenticar};
 }
 
 module.exports = {crearSeguridad};
