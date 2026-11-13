@@ -2,6 +2,7 @@
 // Administración de técnicos. Las cuentas administradoras se gestionan fuera
 // de este módulo para impedir bloqueos accidentales o escaladas de privilegios.
 const express = require('express');
+const { registrarAuditoria } = require('../security/auditoria');
 const crypto = require('node:crypto');
 const {promisify} = require('node:util');
 const scrypt = promisify(crypto.scrypt);
@@ -54,15 +55,27 @@ function crearRouterAdminUsuarios(pool) {
     if (req.body?.rol !== undefined && req.body.rol !== 'tecnico') {
       return res.status(400).json({error: 'Desde este panel solo se pueden crear cuentas de técnico.'});
     }
+    let client;
     try {
       const claveHash = await hashClave(clave);
-      const {rows} = await pool.query(`
+      client = await pool.connect();
+      await client.query('BEGIN');
+      const {rows} = await client.query(`
         INSERT INTO public.app_usuarios (usuario, clave_hash, rol, activo)
         VALUES ($1, $2, 'tecnico', TRUE)
         RETURNING ${CAMPOS_PUBLICOS}
       `, [usuario, claveHash]);
+      await registrarAuditoria(client, req, {
+        modulo: 'usuarios', accion: 'crear', registroId: rows[0].id
+      });
+      await client.query('COMMIT');
       res.status(201).json({usuario: rows[0]});
-    } catch (e) { dbError(res, e, 'crear'); }
+    } catch (e) {
+      if (client) await client.query('ROLLBACK').catch(() => {});
+      dbError(res, e, 'crear');
+    } finally {
+      client?.release();
+    }
   });
 
   async function modificarTecnico(req, res, cambio) {
@@ -107,6 +120,14 @@ function crearRouterAdminUsuarios(pool) {
       // Desactivar revoca inmediatamente todas las sesiones, aunque hubiera
       // un inicio de sesión anterior en el mismo dispositivo.
       if (tieneActivo && !activoFinal) await client.query('DELETE FROM public.app_sesiones WHERE usuario_id=$1', [String(actual.id)]);
+      if (tieneUsuario && nombreFinal !== actual.usuario) {
+        await registrarAuditoria(client, req, {modulo:'usuarios', accion:'editar', registroId:actual.id});
+      }
+      if (tieneActivo && activoFinal !== actual.activo) {
+        await registrarAuditoria(client, req, {
+          modulo:'usuarios', accion:activoFinal ? 'activar' : 'desactivar', registroId:actual.id
+        });
+      }
       return {usuario: rows[0]};
     });
   });
@@ -122,6 +143,7 @@ function crearRouterAdminUsuarios(pool) {
     return modificarTecnico(req, res, async (client, actual) => {
       await client.query('UPDATE public.app_usuarios SET clave_hash=$2 WHERE id=$1', [String(actual.id), claveHash]);
       await client.query('DELETE FROM public.app_sesiones WHERE usuario_id=$1', [String(actual.id)]);
+      await registrarAuditoria(client, req, {modulo:'usuarios', accion:'cambiar_clave', registroId:actual.id});
       return {claveActualizada: true, sesionesRevocadas: true};
     });
   });

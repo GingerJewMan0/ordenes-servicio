@@ -3,6 +3,7 @@
 // ATENCIÓN: la API original no tiene autenticación. No almacenar comprobantes
 // con datos personales en el servidor antes de implementar sesiones/permisos.
 const express = require('express');
+const { registrarAuditoria } = require('../security/auditoria');
 const RUBROS = ['casetas', 'estacionamiento', 'gasolina', 'hospedaje', 'comida', 'refacciones', 'material', 'otros'];
 const CAMPOS = ['empresa_id', 'empleado', 'destino', 'fecha_inicio', 'fecha_fin', 'orden_relacionada', 'motivo', 'observaciones', ...RUBROS];
 const COLUMNAS = ['id','folio','client_request_id', ...CAMPOS,'total','creado_en','actualizado_en','eliminado_en'].join(', ');
@@ -142,7 +143,13 @@ module.exports = function crearRouterViaticos(pool) {
       const valores=[peticion,...CAMPOS.map(c=>datos[c])];
       const insert=await client.query(`INSERT INTO public.viaticos (${columnas.join(',')}) VALUES (${valores.map((_,i)=>`$${i+1}`).join(',')}) ON CONFLICT (client_request_id) DO NOTHING RETURNING ${COLUMNAS}`,valores);
       let fila=insert.rows[0];
-      if (fila) await guardarDias(client,fila.id,dias);
+      if (fila) {
+        await guardarDias(client, fila.id, dias);
+        // Auditoría en la misma transacción: no duplicar cuando se reintenta el POST.
+        await registrarAuditoria(client, req, {
+          modulo: 'viaticos', accion: 'crear', registroId: fila.id, folio: fila.folio
+        });
+      }
       else {
         const existente=await client.query(`SELECT ${COLUMNAS} FROM public.viaticos WHERE client_request_id=$1`,[peticion]);
         fila=existente.rows[0];
@@ -170,19 +177,41 @@ module.exports = function crearRouterViaticos(pool) {
       const {rows}=await client.query(`UPDATE public.viaticos SET ${asignaciones}, actualizado_en=now() WHERE id=$${valores.length+1} AND eliminado_en IS NULL RETURNING ${COLUMNAS}`,[...valores,id]);
       if (!rows.length){const e=new Error('Viático no encontrado.');e.status=404;throw e;}
       if (dias) await guardarDias(client,id,dias);
+      await registrarAuditoria(client, req, {
+        modulo: 'viaticos', accion: 'editar', registroId: rows[0].id, folio: rows[0].folio
+      });
       const agrupados=await leerDias(client,[id]);
       await client.query('COMMIT');
       res.json({viatico:presentar(rows[0],agrupados.get(String(id))||[])});
     } catch(e){if(client)await client.query('ROLLBACK').catch(()=>{}); errorHTTP(res,e);} finally{client?.release();}
   });
-  router.delete('/:id',async(req,res)=>{
+  router.delete('/:id', async (req, res) => {
+    let client;
     try {
-      const id=String(req.params.id);
-      if (!/^\d+$/.test(id))return res.status(400).json({error:'Identificador inválido.'});
-      const {rows}=await pool.query('UPDATE public.viaticos SET eliminado_en=now(),actualizado_en=now() WHERE id=$1 AND eliminado_en IS NULL RETURNING id,folio',[id]);
-      if (!rows.length)return res.status(404).json({error:'Viático no encontrado.'});
-      res.json({eliminado:true,folio:rows[0].folio});
-    } catch(e){errorHTTP(res,e);}
+      const id = String(req.params.id);
+      if (!/^\d+$/.test(id)) return res.status(400).json({error:'Identificador inválido.'});
+      client = await pool.connect();
+      await client.query('BEGIN');
+      const {rows} = await client.query(
+        'UPDATE public.viaticos SET eliminado_en=now(), actualizado_en=now() WHERE id=$1 AND eliminado_en IS NULL RETURNING id,folio',
+        [id]
+      );
+      if (!rows.length) {
+        const e = new Error('Viático no encontrado.');
+        e.status = 404;
+        throw e;
+      }
+      await registrarAuditoria(client, req, {
+        modulo: 'viaticos', accion: 'eliminar', registroId: rows[0].id, folio: rows[0].folio
+      });
+      await client.query('COMMIT');
+      res.json({eliminado:true, folio:rows[0].folio});
+    } catch (e) {
+      if (client) await client.query('ROLLBACK').catch(() => {});
+      errorHTTP(res,e);
+    } finally {
+      client?.release();
+    }
   });
   return router;
 };
