@@ -3,6 +3,7 @@ const { Pool } = require('pg');
 const cors = require('cors');
 const path = require('path');
 const crearRouterViaticos = require('./routes/viaticos');
+const crearRouterComprobantesViaticos = require('./routes/comprobantesViaticos');
 const { crearSeguridad } = require('./security/sesiones');
 const { crearRouterAdminUsuarios } = require('./routes/adminUsuarios');
 require('dotenv').config();
@@ -30,8 +31,16 @@ app.use('/api/auth', seguridad.router);
 app.use('/api/admin/usuarios', seguridad.verificarSesionSiempre, crearRouterAdminUsuarios(pool));
 app.use('/api/ordenes', seguridad.requerirSesion);
 app.use('/api/viaticos', seguridad.requerirSesion);
-// El resto de operaciones permite rol técnico; eliminación de viáticos solo admin.
-app.delete('/api/viaticos/:id', seguridad.soloAdmin);
+// Edición y eliminación de viáticos: únicamente administrador, SIEMPRE.
+// No depender de APP_AUTH_REQUIRED para estas mutaciones.
+const exigirAdminViaticos = (req, res, next) => {
+  if (!req.usuarioApp) return res.status(401).json({ error: 'Inicia sesión para continuar.' });
+  if (req.usuarioApp.rol !== 'admin') return res.status(403).json({ error: 'Esta acción requiere una cuenta administradora.' });
+  return next();
+};
+app.put('/api/viaticos/:id', exigirAdminViaticos);
+app.patch('/api/viaticos/:id', exigirAdminViaticos);
+app.delete('/api/viaticos/:id', exigirAdminViaticos);
 
 // Obtener todas las órdenes de servicio
 app.get('/api/ordenes', async (req, res) => {
@@ -80,6 +89,9 @@ app.post('/api/ordenes', async (req, res) => {
     res.status(500).send('Error al registrar la orden de servicio');
   }
 });
+
+// Comprobantes privados: siempre exige una sesión y aplica permisos por archivo.
+app.use('/api/viaticos/:id/comprobantes', crearRouterComprobantesViaticos(pool));
 
 // Viáticos: usa el mismo Pool de PostgreSQL, en una tabla independiente.
 app.use('/api/viaticos', crearRouterViaticos(pool));

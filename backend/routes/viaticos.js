@@ -1,7 +1,7 @@
 // Viáticos por semana: un folio, gastos y hospitales por fecha.
 // Montar con app.use('/api/viaticos', crearRouterViaticos(pool)).
-// ATENCIÓN: la API original no tiene autenticación. No almacenar comprobantes
-// con datos personales en el servidor antes de implementar sesiones/permisos.
+// Autenticación montada en server.js. PUT y DELETE solo admin desde server.js.
+// Las cargas iniciales se controlan mediante la tabla de captura por usuario.
 const express = require('express');
 const { registrarAuditoria } = require('../security/auditoria');
 const RUBROS = ['casetas', 'estacionamiento', 'gasolina', 'hospedaje', 'comida', 'refacciones', 'material', 'otros'];
@@ -145,6 +145,11 @@ module.exports = function crearRouterViaticos(pool) {
       let fila=insert.rows[0];
       if (fila) {
         await guardarDias(client, fila.id, dias);
+        await client.query(
+          `INSERT INTO public.viaticos_captura_comprobantes
+           (viatico_id, usuario_creador, estado) VALUES ($1, $2, 'pendiente')`,
+          [fila.id, req.usuarioApp.usuario]
+        );
         // Auditoría en la misma transacción: no duplicar cuando se reintenta el POST.
         await registrarAuditoria(client, req, {
           modulo: 'viaticos', accion: 'crear', registroId: fila.id, folio: fila.folio
@@ -161,6 +166,8 @@ module.exports = function crearRouterViaticos(pool) {
     } catch(e){if(client)await client.query('ROLLBACK').catch(()=>{}); errorHTTP(res,e);} finally{client?.release();}
   });
   router.put('/:id',async (req,res)=>{
+    if (!req.usuarioApp) return res.status(401).json({error:'Inicia sesión para continuar.'});
+    if (req.usuarioApp.rol !== 'admin') return res.status(403).json({error:'Solo administradores pueden editar viáticos.'});
     let client;
     try {
       client=await pool.connect();
@@ -186,6 +193,8 @@ module.exports = function crearRouterViaticos(pool) {
     } catch(e){if(client)await client.query('ROLLBACK').catch(()=>{}); errorHTTP(res,e);} finally{client?.release();}
   });
   router.delete('/:id', async (req, res) => {
+    if (!req.usuarioApp) return res.status(401).json({error:'Inicia sesión para continuar.'});
+    if (req.usuarioApp.rol !== 'admin') return res.status(403).json({error:'Solo administradores pueden eliminar viáticos.'});
     let client;
     try {
       const id = String(req.params.id);

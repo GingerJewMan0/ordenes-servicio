@@ -10,9 +10,11 @@
     "node": ">=20 <27"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.119.1",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "express": "^4.21.2",
+    "multer": "^2.5.0",
     "pg": "^8.13.1"
   }
 }
