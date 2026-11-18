@@ -1,0 +1,14 @@
+# Variables de entorno y credenciales
+.env
+.env.*
+!.env.example
+
+# Dependencias
+node_modules/
+
+# Respaldos locales
+*.respaldo
+
+# Archivos temporales
+*.log
+npm-debug.log*

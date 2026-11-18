@@ -5,6 +5,7 @@ const path = require('path');
 require('dotenv').config();
 const { crearSeguridad } = require('./security/sesiones');
 const { registrarAuditoria } = require('./security/auditoria');
+const { crearRouterEvidencias } = require('./security/evidencias');
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -25,6 +26,13 @@ app.set('trust proxy', 1); // Render usa un proxy inverso.
 const seguridad = crearSeguridad(pool);
 app.use('/api/auth', seguridad.router);
 app.use('/api/ordenes', seguridad.requerirSesion);
+app.use(
+  '/api/ordenes/:id/evidencias',
+  crearRouterEvidencias({
+    pool,
+    requerirSesion: seguridad.requerirSesion
+  })
+);
 
 
 // Obtener todas las órdenes de servicio
@@ -84,6 +92,11 @@ app.get('/api/ordenes/:id', idValido, async (req, res) => {
 
 // Crear orden: conservar el trigger de folio automático y auditar en la misma transacción.
 app.post('/api/ordenes', async (req, res) => {
+  if (!req.usuarioApp?.usuario) {
+  return res.status(401).json({
+    error: 'Debes iniciar sesión para crear órdenes.'
+  });
+}
   const {
     empresa, folio_orden, motivo_servicio, nombre_unidad_medica, direccion,
     ubicacion, contacto, no_contrato, tel_unidad, tel_responsable,
@@ -113,6 +126,12 @@ app.post('/api/ordenes', async (req, res) => {
       reporte ?? null, material_refacciones ?? null, pruebas_electricas ?? null, simulador ?? null
     ];
     const {rows} = await cliente.query(query, values);
+    await cliente.query(
+  `INSERT INTO public.ordenes_captura_evidencias
+     (orden_id, usuario_creador, estado)
+   VALUES ($1, $2, 'pendiente')`,
+  [rows[0].id, req.usuarioApp.usuario]
+);
     await registrarAuditoria(cliente, req, {
       modulo: 'ordenes', accion: 'crear', registroId: rows[0].id,
       folio: rows[0].folio_orden
@@ -169,8 +188,21 @@ async function editarOrden(req, res) {
     return errorOrden(res, err, 'editar');
   } finally { cliente?.release(); }
 }
-app.put('/api/ordenes/:id', idValido, editarOrden);
-app.patch('/api/ordenes/:id', idValido, editarOrden);
+
+app.put(
+  '/api/ordenes/:id',
+  idValido,
+  exigirAdministrador,
+  editarOrden
+);
+
+app.patch(
+  '/api/ordenes/:id',
+  idValido,
+  exigirAdministrador,
+  editarOrden
+);
+
 
 // Eliminación lógica e irreversible desde esta API: solo admin.
 // Los datos permanecen en PostgreSQL para auditoría y posible recuperación administrativa.
