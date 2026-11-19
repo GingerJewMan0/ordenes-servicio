@@ -1,5 +1,6 @@
 'use strict';
-// Administración de técnicos. Las cuentas administradoras se gestionan fuera
+// Administración de técnicos: crear, renombrar, cambiar contraseña y eliminar.
+// Las cuentas administradoras se gestionan fuera
 // de este módulo para impedir bloqueos accidentales o escaladas de privilegios.
 const express = require('express');
 const { registrarAuditoria } = require('../security/auditoria');
@@ -33,6 +34,7 @@ function crearRouterAdminUsuarios(pool) {
 
   function dbError(res, error, contexto) {
     if (error?.code === '23505') return res.status(409).json({error: 'Ese nombre de usuario ya existe.'});
+    if (error?.code === '23503') return res.status(409).json({error: 'La cuenta tiene referencias en la base de datos. No se puede eliminar sin afectar el historial.'});
     console.error(`[admin-usuarios/${contexto}]`, error?.code || error?.message || 'error');
     return res.status(503).json({error: 'No se pudo completar la operación. Inténtalo nuevamente.'});
   }
@@ -94,39 +96,82 @@ function crearRouterAdminUsuarios(pool) {
       return res.json(resultado);
     } catch (e) {
       if (client) await client.query('ROLLBACK').catch(() => {});
+      if (e?.code === 'USUARIO_CON_HISTORIAL') return res.status(409).json({error: e.message});
       return dbError(res, e, 'modificar');
     } finally {
       if (client) client.release();
     }
   }
 
+  // Los sistemas históricos registran la autoría principalmente por el nombre
+  // de acceso. Sin una tabla de alias con IDs inmutables, un cambio de nombre
+  // puede separar al técnico de sus evidencias y capturas pendientes.
+  // La consulta compartida se ejecuta DENTRO de la transacción y del bloqueo
+  // FOR UPDATE de app_usuarios, tanto al renombrar como al eliminar.
+  async function tieneHistorialTecnico(client, actual) {
+    const {rows} = await client.query(`
+      SELECT
+        EXISTS(SELECT 1 FROM public.app_auditoria
+               WHERE usuario_id=$1::bigint OR usuario=$2) OR
+        -- Un renombre anterior obliga a conservar el ID y su trazabilidad;
+        -- las referencias al alias antiguo podrían seguir existiendo.
+        EXISTS(SELECT 1 FROM public.app_auditoria
+               WHERE modulo='usuarios' AND accion='editar'
+                 AND registro_id::text=$1::text) OR
+        EXISTS(SELECT 1 FROM public.ordenes_captura_evidencias
+               WHERE usuario_creador=$2) OR
+        EXISTS(SELECT 1 FROM public.ordenes_evidencias
+               WHERE creado_por_usuario=$2) OR
+        EXISTS(SELECT 1 FROM public.ordenes_servicio
+               WHERE tecnico_servicio=$2) OR
+        EXISTS(SELECT 1 FROM public.viaticos_captura_comprobantes
+               WHERE usuario_creador=$2) OR
+        EXISTS(SELECT 1 FROM public.viaticos_comprobantes
+               WHERE creado_por_usuario=$2 OR cambiado_por_usuario=$2)
+        AS tiene_historial
+    `, [String(actual.id), actual.usuario]);
+    // En caso de respuesta desconocida, fallar cerrado: nunca asumir ausencia.
+    if (rows.length !== 1 || typeof rows[0].tiene_historial !== 'boolean') {
+      const e = new Error('No se pudo comprobar el historial del técnico.');
+      e.code = 'HISTORIAL_INDETERMINADO';
+      throw e;
+    }
+    return rows[0].tiene_historial;
+  }
+
+  function rechazarHistorial(accion) {
+    const e = new Error(accion === 'renombrar'
+      ? 'Este técnico ya tiene actividad o cambios de nombre anteriores. Para conservar la autoría de órdenes, evidencias y viáticos, su nombre de acceso no puede cambiarse desde la aplicación. Sí puedes restablecer su contraseña.'
+      : 'Este técnico tiene actividad o cambios de nombre anteriores. No se puede eliminar definitivamente desde la aplicación sin poner en riesgo su historial.');
+    e.code = 'USUARIO_CON_HISTORIAL';
+    throw e;
+  }
+
   router.patch('/:id', async (req, res) => {
-    const tieneUsuario = Object.prototype.hasOwnProperty.call(req.body || {}, 'usuario');
-    const tieneActivo = Object.prototype.hasOwnProperty.call(req.body || {}, 'activo');
-    if (!tieneUsuario && !tieneActivo) return res.status(400).json({error: 'No hay cambios para guardar.'});
-    if (Object.prototype.hasOwnProperty.call(req.body || {}, 'rol')) return res.status(400).json({error: 'El rol no se puede modificar desde esta pantalla.'});
-    const usuario = tieneUsuario ? String(req.body.usuario || '').trim().toLowerCase() : null;
-    const activo = tieneActivo ? req.body.activo : null;
-    if ((tieneUsuario && !REGEX_USUARIO.test(usuario)) || (tieneActivo && typeof activo !== 'boolean')) {
-      return res.status(400).json({error: 'Nombre de usuario o estado inválido.'});
+    // Solo se permite cambiar el nombre. No activar, desactivar ni cambiar roles.
+    if (Object.prototype.hasOwnProperty.call(req.body || {}, 'rol') ||
+        Object.prototype.hasOwnProperty.call(req.body || {}, 'activo')) {
+      return res.status(400).json({error: 'Este panel solo permite editar nombres de técnicos; no permite cambiar roles o estados.'});
+    }
+    if (!Object.prototype.hasOwnProperty.call(req.body || {}, 'usuario')) {
+      return res.status(400).json({error: 'Indica el nuevo nombre de usuario.'});
+    }
+    const usuario = String(req.body.usuario || '').trim().toLowerCase();
+    if (!REGEX_USUARIO.test(usuario)) {
+      return res.status(400).json({error: 'Nombre de usuario inválido.'});
     }
     return modificarTecnico(req, res, async (client, actual) => {
-      const nombreFinal = tieneUsuario ? usuario : actual.usuario;
-      const activoFinal = tieneActivo ? activo : actual.activo;
-      const {rows} = await client.query(`
-        UPDATE public.app_usuarios SET usuario=$2, activo=$3 WHERE id=$1
-        RETURNING ${CAMPOS_PUBLICOS}
-      `, [String(actual.id), nombreFinal, activoFinal]);
-      // Desactivar revoca inmediatamente todas las sesiones, aunque hubiera
-      // un inicio de sesión anterior en el mismo dispositivo.
-      if (tieneActivo && !activoFinal) await client.query('DELETE FROM public.app_sesiones WHERE usuario_id=$1', [String(actual.id)]);
-      if (tieneUsuario && nombreFinal !== actual.usuario) {
-        await registrarAuditoria(client, req, {modulo:'usuarios', accion:'editar', registroId:actual.id});
+      if (usuario !== actual.usuario && await tieneHistorialTecnico(client, actual)) {
+        rechazarHistorial('renombrar');
       }
-      if (tieneActivo && activoFinal !== actual.activo) {
-        await registrarAuditoria(client, req, {
-          modulo:'usuarios', accion:activoFinal ? 'activar' : 'desactivar', registroId:actual.id
-        });
+      const {rows} = await client.query(`
+        UPDATE public.app_usuarios SET usuario=$2 WHERE id=$1
+        RETURNING ${CAMPOS_PUBLICOS}
+      `, [String(actual.id), usuario]);
+      if (usuario !== actual.usuario) {
+        // Invalidar sesiones antiguas: no deben conservar una identidad desactualizada.
+        await client.query('DELETE FROM public.app_sesiones WHERE usuario_id=$1', [String(actual.id)]);
+        await registrarAuditoria(client, req, {modulo:'usuarios', accion:'editar', registroId:actual.id});
       }
       return {usuario: rows[0]};
     });
@@ -145,6 +190,28 @@ function crearRouterAdminUsuarios(pool) {
       await client.query('DELETE FROM public.app_sesiones WHERE usuario_id=$1', [String(actual.id)]);
       await registrarAuditoria(client, req, {modulo:'usuarios', accion:'cambiar_clave', registroId:actual.id});
       return {claveActualizada: true, sesionesRevocadas: true};
+    });
+  });
+
+  // Eliminación física únicamente de cuentas de técnicos sin historial.
+  // La acción revoca sus sesiones y deja una auditoría del administrador.
+  // No se borran órdenes, evidencias, viáticos ni auditorías existentes.
+  router.delete('/:id', async (req, res) => {
+    return modificarTecnico(req, res, async (client, actual) => {
+      if (await tieneHistorialTecnico(client, actual)) {
+        rechazarHistorial('eliminar');
+      }
+      await client.query('DELETE FROM public.app_sesiones WHERE usuario_id=$1', [String(actual.id)]);
+      const {rows: borrados} = await client.query(`
+        DELETE FROM public.app_usuarios WHERE id=$1 AND rol='tecnico' RETURNING id
+      `, [String(actual.id)]);
+      if (borrados.length !== 1) {
+        const e = new Error('No se pudo confirmar la eliminación.');
+        e.code = 'DELETE_NOT_CONFIRMED';
+        throw e;
+      }
+      await registrarAuditoria(client, req, {modulo:'usuarios', accion:'eliminar', registroId:actual.id});
+      return {eliminado: true, id: String(actual.id), sesionesRevocadas: true};
     });
   });
 
