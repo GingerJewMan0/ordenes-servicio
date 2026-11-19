@@ -61,7 +61,7 @@ export default function HomeScreen({ navigation }) {
               <Text style={styles.text}>Equipo: {item.equipo || '—'} ({item.marca || 'Sin marca'})</Text>
               <Text style={styles.text}>Motivo: {item.motivo_servicio || '—'}</Text>
               <Text style={styles.status}>Estado: {item.estado_orden || 'Sin definir'}</Text>
-              <Text style={styles.detalle}>Toca para ver y compartir copia PDF</Text>
+              <Text style={styles.detalle}>Toca para ver, editar o compartir PDF</Text>
             </TouchableOpacity>
           )}
         />}

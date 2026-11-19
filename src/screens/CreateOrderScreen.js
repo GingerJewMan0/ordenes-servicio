@@ -5,9 +5,11 @@ import {
 } from 'react-native';
 import axios from 'axios';
 import * as ImagePicker from 'expo-image-picker';
+import * as ImageManipulator from 'expo-image-manipulator';
 import SignatureCanvas from 'react-native-signature-canvas';
 import { API_URL, EMPRESAS, MOTIVOS, prepararOrdenServidor, folioDeRespuesta, idDeRespuesta, buscarFolioPorId } from '../services/api';
-import { guardarFirma, guardarFoto, guardarOrdenLocal, guardarOrdenPendiente } from '../services/ordenesLocales';
+import { guardarFirma, guardarFoto, guardarOrdenLocal, guardarOrdenPendiente, guardarEstadoSincronizacion } from '../services/ordenesLocales';
+import { sincronizarCapturaInicial } from '../services/evidenciasApi';
 import { compartirPdfOrden } from '../services/pdfOrden';
 
 const FORM_INICIAL = {
@@ -43,6 +45,9 @@ export default function CreateOrderScreen({ navigation }) {
   const [firmaVisible, setFirmaVisible] = useState(null);
   const [ocupado, setOcupado] = useState(false);
   const [guardada, setGuardada] = useState(false);
+  const [backendId, setBackendId] = useState(null);
+  const [estadoEvidencias, setEstadoEvidencias] = useState('sin-iniciar');
+  const [progresoEvidencias, setProgresoEvidencias] = useState('');
   const firmaRef = useRef(null);
 
   const handleChange = (campo, texto) => {
@@ -79,7 +84,11 @@ export default function CreateOrderScreen({ navigation }) {
       const asset = await obtenerImagen(camara);
       if (!asset) return;
       setOcupado(true);
-      const uri = await guardarFoto(asset, etapa);
+      // Normalizar HEIC/WEBP a JPEG antes del respaldo local y la subida.
+      const jpeg = await ImageManipulator.manipulateAsync(asset.uri, [], {
+        compress: 0.7, format: ImageManipulator.SaveFormat.JPEG
+      });
+      const uri = await guardarFoto({ uri: jpeg.uri, mimeType: 'image/jpeg' }, etapa);
       if (etapa === 'antes') setFotosAntes((anterior) => [...anterior, uri]);
       else setFotosDespues((anterior) => [...anterior, uri]);
     } catch (error) {
@@ -105,10 +114,11 @@ export default function CreateOrderScreen({ navigation }) {
     }
   };
 
-  const armarOrdenLocal = (folio) => ({
+  const armarOrdenLocal = (folio, idPostgres = backendId) => ({
     form: { ...form, folio_orden: String(folio ?? form.folio_orden ?? '') },
     empresaId, logo, contactoEmpresa: { ...contactoEmpresa },
-    fotosAntes, fotosDespues, firmaTecnico, firmaResponsable
+    fotosAntes, fotosDespues, firmaTecnico, firmaResponsable,
+    backendId: idPostgres
   });
 
   const validar = () => {
@@ -126,6 +136,48 @@ export default function CreateOrderScreen({ navigation }) {
   };
 
 
+  // Sincroniza únicamente una orden que YA tiene ID de PostgreSQL.
+  // Nunca repite el POST /api/ordenes; las posiciones remotas se consultan
+  // antes de cada reintento para no duplicar fotografías ni firmas.
+  const reintentarEvidencias = async (idConfirmado = backendId, folio = form.folio_orden) => {
+    if (!Number.isSafeInteger(Number(idConfirmado)) || Number(idConfirmado) <= 0 || !folio) {
+      Alert.alert('Sincronización pendiente',
+        'La orden ya se envió, pero falta confirmar su ID o folio. Revísala en el listado; NO vuelvas a guardarla.');
+      return;
+    }
+    if (ocupado || estadoEvidencias === 'sincronizando') return;
+    setOcupado(true);
+    setEstadoEvidencias('sincronizando');
+    setProgresoEvidencias('Comprobando evidencias guardadas...');
+    try {
+      // Antes de enviar, confirmar que las 8 evidencias todavía existen localmente.
+      const copia = armarOrdenLocal(folio, idConfirmado);
+      await guardarOrdenLocal({ ...copia, sincronizacionEvidencias: 'pendiente' });
+      const resultado = await sincronizarCapturaInicial(idConfirmado, copia, (hechas, total) => {
+        setProgresoEvidencias(`${hechas}/${total} evidencias verificadas`);
+      });
+      await guardarEstadoSincronizacion(folio, empresaId, idConfirmado, 'cerrada');
+      setEstadoEvidencias('cerrada');
+      setProgresoEvidencias(`${resultado.total} evidencias respaldadas; captura cerrada.`);
+      Alert.alert('Respaldo confirmado',
+        `Orden #${folio}: evidencias sincronizadas y captura cerrada en el servidor.`);
+    } catch (error) {
+      const mensaje = String(error?.response?.data?.error || error?.message || 'Error desconocido');
+      setEstadoEvidencias('pendiente');
+      setProgresoEvidencias('Respaldo incompleto. Puedes reintentarlo sin crear otra orden.');
+      try {
+        await guardarEstadoSincronizacion(folio, empresaId, idConfirmado, 'pendiente', mensaje);
+      } catch (e) {
+        console.warn('No se pudo actualizar el estado de sincronización:', e?.message);
+      }
+      Alert.alert('Orden creada; evidencias pendientes',
+        `El folio #${folio} ya existe en PostgreSQL. No vuelvas a crear la orden. ` +
+        `Las fotografías y firmas se conservan en este teléfono. Detalle: ${mensaje}`);
+    } finally {
+      setOcupado(false);
+    }
+  };
+
   const handleSubmit = async () => {
     if (ocupado || guardada) return;
     const problema = validar();
@@ -133,9 +185,8 @@ export default function CreateOrderScreen({ navigation }) {
     setOcupado(true);
     let respuesta;
     try {
-      // El teléfono NO asigna folios a órdenes: debe hacerlo PostgreSQL.
-      // El SQL adjunto instala un trigger que sustituye el 0 heredado de la API.
-      respuesta = await axios.post(API_URL, prepararOrdenServidor(form), { timeout: 30000 });
+      // La empresa seleccionada queda registrada en PostgreSQL.
+      respuesta = await axios.post(API_URL, prepararOrdenServidor(form, empresaId), { timeout: 30000 });
     } catch (error) {
       setOcupado(false);
       Alert.alert('No se pudo confirmar el guardado',
@@ -144,50 +195,85 @@ export default function CreateOrderScreen({ navigation }) {
       return;
     }
 
-    // Nunca inventamos el folio a partir del máximo observado, ni del ID interno.
+    // La API asigna un ID y folio; nunca inventarlos ni repetir el POST.
+    const idPostgres = idDeRespuesta(respuesta);
+    setBackendId(idPostgres);
     let folio = folioDeRespuesta(respuesta);
-    if (!folio) {
-      const id = idDeRespuesta(respuesta);
-      if (id) {
-        try { folio = await buscarFolioPorId(axios, id); }
-        catch (error) { console.warn('No se pudo consultar el folio asignado:', error.message); }
-      }
+    if (!folio && idPostgres) {
+      try { folio = await buscarFolioPorId(axios, idPostgres); }
+      catch (error) { console.warn('No se pudo consultar el folio asignado:', error.message); }
     }
     if (!folio) {
-      // POST ya respondió: NO repetirlo. Se conservan evidencias con un
-      // identificador temporal para poder recuperarlas cuando mejore la API.
       try {
-        await guardarOrdenPendiente(armarOrdenLocal(''), idDeRespuesta(respuesta));
+        await guardarOrdenPendiente(armarOrdenLocal('', idPostgres), idPostgres);
       } catch (err) {
         console.warn('No se pudieron conservar las evidencias pendientes:', err.message);
       }
       setGuardada(true);
+      setEstadoEvidencias('pendiente');
       setOcupado(false);
       Alert.alert('Orden enviada, folio pendiente',
         'El servidor respondió, pero no devolvió el folio asignado. ' +
-        'No repitas el envío. Comprueba la orden en el listado/pgAdmin. ' +
-        'Es necesario que la API devuelva id y folio_orden para emitir su PDF.');
+        'NO vuelvas a enviar esta orden. Revísala en el listado; sus evidencias están pendientes.');
       return;
     }
 
+    const numero = String(folio);
+    setForm((anterior) => ({ ...anterior, folio_orden: numero }));
+    setGuardada(true);
+    setEstadoEvidencias('pendiente');
     try {
-      const numero = String(folio);
-      setForm((anterior) => ({ ...anterior, folio_orden: numero }));
-      await guardarOrdenLocal(armarOrdenLocal(numero));
-      setGuardada(true);
-      Alert.alert('Orden guardada',
-        `Folio asignado automáticamente: ${numero}. Ya puedes generar y compartir el PDF. ` +
-        'Las firmas y fotografías aún se conservan solo en este dispositivo.');
+      await guardarOrdenLocal({
+        ...armarOrdenLocal(numero, idPostgres),
+        sincronizacionEvidencias: 'pendiente'
+      });
     } catch (error) {
-      // La API ya guardó la orden; no debemos permitir un segundo POST.
-      setGuardada(true);
-      Alert.alert('Guardado parcial',
-        `El servidor asignó el folio ${folio}, pero falló el registro local de evidencias: ` +
-        error.message + '. NO vuelvas a enviar la orden.');
-    } finally {
       setOcupado(false);
+      Alert.alert('Orden creada, copia local pendiente',
+        `El folio #${numero} YA se creó en el servidor, pero no se pudieron registrar ` +
+        `las evidencias locales: ${error.message}. No vuelvas a pulsar Guardar orden. ` +
+        'Puedes intentar nuevamente el respaldo desde esta pantalla.');
+      return;
     }
+    setOcupado(false);
+    if (!idPostgres) {
+      Alert.alert('Orden creada; falta ID del servidor',
+        `Folio #${numero} creado. No repitas el envío. ` +
+        'Falta confirmar el ID de PostgreSQL antes de subir evidencias.');
+      return;
+    }
+    // El POST de la orden terminó: el reintento únicamente sube evidencias.
+    // No depender del estado React inmediatamente después de setOcupado(false).
+    await sincronizarConIdConfirmado(idPostgres, numero);
   };
+
+  // Esta entrada se utiliza justo después de guardar: no depende de que React
+  // haya aplicado setState de backendId/guardada en este mismo render.
+  const sincronizarConIdConfirmado = async (id, folio) => {
+    setOcupado(true);
+    setEstadoEvidencias('sincronizando');
+    try {
+      const copia = armarOrdenLocal(folio, id);
+      const resultado = await sincronizarCapturaInicial(id, copia, (hechas, total) => {
+        setProgresoEvidencias(`${hechas}/${total} evidencias verificadas`);
+      });
+      await guardarEstadoSincronizacion(folio, empresaId, id, 'cerrada');
+      setEstadoEvidencias('cerrada');
+      setProgresoEvidencias(`${resultado.total} evidencias respaldadas; captura cerrada.`);
+      Alert.alert('Orden guardada y respaldada',
+        `Folio asignado: ${folio}. Las fotos y firmas se respaldaron en Supabase. Ya puedes compartir el PDF.`);
+    } catch (error) {
+      const mensaje = String(error?.response?.data?.error || error?.message || 'Error desconocido');
+      setEstadoEvidencias('pendiente');
+      setProgresoEvidencias('Respaldo incompleto. Puedes reintentarlo sin crear otra orden.');
+      try { await guardarEstadoSincronizacion(folio, empresaId, id, 'pendiente', mensaje); }
+      catch (e) { console.warn('No se pudo guardar estado pendiente:', e?.message); }
+      Alert.alert('Orden guardada; respaldo pendiente',
+        `Folio ${folio} creado en PostgreSQL. La copia local sigue intacta. ` +
+        `No vuelvas a crear la orden: pulsa Reintentar sincronización. Detalle: ${mensaje}`);
+    } finally { setOcupado(false); }
+  };
+
   const compartir = async () => {
     if (!guardada || ocupado || !form.folio_orden) return;
     setOcupado(true);
@@ -354,7 +440,7 @@ export default function CreateOrderScreen({ navigation }) {
         {renderFirma('Firma del responsable *', 'responsable', firmaResponsable)}
 
         <View style={styles.nota}>
-          <Text style={styles.notaTexto}>IMPORTANTE: los folios oficiales se asignan por PostgreSQL al guardar. La API antigua recibe los campos habituales. Reporte, material y refacciones, pruebas eléctricas, simulador y los datos empresariales se guardan SOLO en este teléfono, al igual que fotos y firmas. Recomendaciones se envía al campo antiguo de mantenimiento correctivo; Marca y Modelo se envía al campo antiguo de marca. Falta adaptar el backend para sincronizarlos correctamente.</Text>
+          <Text style={styles.notaTexto}>IMPORTANTE: los folios oficiales se asignan por PostgreSQL al guardar. Reporte, material y refacciones, pruebas eléctricas y simulador se guardan en PostgreSQL. Las fotografías y firmas se guardan localmente y, después de crear la orden, se respaldan en el servidor privado. Recomendaciones se envía al campo antiguo de mantenimiento correctivo; Marca y Modelo se envía al campo antiguo de marca. El folio, las fotos y las firmas no se alteran al actualizar estos textos.</Text>
         </View>
         {ocupado && <ActivityIndicator size="large" color="#2563a6" style={{ margin: 12 }} />}
         {!guardada ? (
@@ -367,6 +453,14 @@ export default function CreateOrderScreen({ navigation }) {
             {form.folio_orden ? (
               <>
                 <Text style={styles.exito}>✓ Orden #{form.folio_orden} guardada. Lista para entregar copia.</Text>
+                <Text style={styles.aviso}>Respaldo: {estadoEvidencias === 'cerrada' ? 'completo' :
+                  estadoEvidencias === 'sincronizando' ? 'sincronizando...' : 'pendiente'}</Text>
+                {!!progresoEvidencias && <Text style={styles.notaTexto}>{progresoEvidencias}</Text>}
+                {estadoEvidencias !== 'cerrada' && Number.isSafeInteger(Number(backendId)) && Number(backendId) > 0 &&
+                  <TouchableOpacity style={styles.secundario}
+                    onPress={() => reintentarEvidencias()} disabled={ocupado}>
+                    <Text style={styles.secundarioTexto}>Reintentar sincronización (sin crear otra orden)</Text>
+                  </TouchableOpacity>}
                 <TouchableOpacity style={styles.botonPrincipal} onPress={compartir} disabled={ocupado}>
                   <Text style={styles.botonPrincipalTexto}>Compartir copia PDF con cliente</Text>
                 </TouchableOpacity>

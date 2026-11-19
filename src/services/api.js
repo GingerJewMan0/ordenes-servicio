@@ -1,17 +1,19 @@
+import axios from 'axios';
 // Una sola URL para listar y crear órdenes. Para cambiar de servidor, edita aquí.
 export const API_URL = 'https://ordenes-servicio-jdej.onrender.com/api/ordenes';
 
-// El backend recibido en el proyecto solo tiene contrato conocido para estos campos.
-// No intentamos enviar fotografías ni firmas en JSON: necesitan almacenamiento y API propios.
+// Campos de PostgreSQL. Requiere la migración SQL y el backend actualizado.
+// Las fotografías y firmas se sincronizan mediante la API de evidencias privada.
 export const CAMPOS_BACKEND = [
   'motivo_servicio', 'nombre_unidad_medica', 'direccion',
   'ubicacion', 'contacto', 'no_contrato', 'tel_unidad', 'tel_responsable',
   'tiempo_garantia', 'equipo', 'marca', 'modelo', 'serie', 'inventario',
   'observaciones', 'observaciones_mtto_correctivo', 'tecnico_servicio',
-  'responsable_unidad'
+  'responsable_unidad', 'reporte', 'material_refacciones',
+  'pruebas_electricas', 'simulador'
 ];
 
-export const prepararOrdenServidor = (form) => {
+export const prepararOrdenServidor = (form, empresaId) => {
   const payload = {};
   CAMPOS_BACKEND.forEach((campo) => {
     if (campo === 'marca') {
@@ -32,6 +34,18 @@ export const prepararOrdenServidor = (form) => {
   // El trigger sustituye este valor por el folio oficial al insertar la orden.
   // IMPORTANTE: nunca usar 0 en un PDF ni como folio definitivo.
   payload.folio_orden = 0;
+  // Empresa exacta seleccionada en la app, para no usar el valor por defecto
+  // (Mexus) del backend al crear una orden de Opciones Médicas.
+  // Nunca dejar que el backend asigne silenciosamente su empresa predeterminada.
+  // La pantalla de creación pasa empresaId; se conserva compatibilidad con
+  // formularios antiguos que pasen el nombre canónico directamente.
+  const empresa = empresaId !== undefined && empresaId !== null
+    ? EMPRESAS.find((e) => e.id === empresaId)
+    : empresaDeRegistro({ empresa: form?.empresa });
+  if (!empresa) {
+    throw new Error('Selecciona una empresa válida antes de guardar la orden.');
+  }
+  payload.empresa = empresa.nombre;
   return payload;
 };
 
@@ -62,6 +76,26 @@ export const EMPRESAS = [
     }
   }
 ];
+
+// Resolver una empresa registrada en PostgreSQL SIN recurrir a una copia local.
+// Las versiones antiguas usaron puntuación distinta en las razones sociales.
+const normalizarNombreEmpresa = (valor) => String(valor ?? '')
+  .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+  .toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+
+export const empresaDeRegistro = (registro) => {
+  const nombre = normalizarNombreEmpresa(registro?.empresa);
+  if (nombre) {
+    // Coincidencia exacta tras normalizar tildes y puntuación; no aceptar
+    // variantes arbitrarias con solo compartir parte del nombre.
+    return EMPRESAS.find((e) =>
+      normalizarNombreEmpresa(e.nombre) === nombre || e.id === nombre
+    ) || null;
+  }
+  // Compatibilidad con APIs que guardan explícitamente un identificador,
+  // pero todavía no devuelven una razón social.
+  return EMPRESAS.find((e) => e.id === registro?.empresaId) || null;
+};
 
 export const MOTIVOS = [
   'Apertura',
@@ -111,3 +145,22 @@ export const buscarFolioPorId = async (axiosCliente, id) => {
   const folio = Number(orden?.folio_orden);
   return Number.isSafeInteger(folio) && folio >= 1001 ? folio : null;
 };
+
+
+// Edición y eliminación de órdenes: se usa el ID de PostgreSQL, nunca el folio.
+// El interceptor global de authSesion adjunta el Bearer token a estas llamadas.
+const validarIdOrden = (id) => {
+  const numero = Number(id);
+  if (!Number.isSafeInteger(numero) || numero <= 0) {
+    throw new Error('La orden no tiene un identificador de PostgreSQL válido.');
+  }
+  return numero;
+};
+
+export const editarOrdenEnServidor = (id, cambios) => axios.patch(
+  `${API_URL}/${validarIdOrden(id)}`, cambios, { timeout: 90000 }
+);
+
+export const eliminarOrdenEnServidor = (id) => axios.delete(
+  `${API_URL}/${validarIdOrden(id)}`, { timeout: 90000 }
+);

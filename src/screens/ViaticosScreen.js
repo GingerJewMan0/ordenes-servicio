@@ -6,6 +6,8 @@ import { eliminarViatico, listarViaticos } from '../services/viaticosLocal';
 import { listarViaticosServidor, crearViaticoServidor, actualizarViaticoServidor, eliminarViaticoServidor, comprobarViaticoPorSolicitud, esGuardadoIncierto, explicarErrorViaticos } from '../services/viaticosApi';
 import { compartirPdfViaticos, generarPdfViaticos } from '../services/pdfViaticos';
 import { leerComprobantes, guardarComprobantes, pasarBorradorAViatico, borrarComprobantes, copiarComprobante, quitarArchivoComprobante } from '../services/comprobantesViaticos';
+import { obtenerPerfilSesion } from '../services/authSesion';
+import { listarComprobantesRemotos, obtenerComprobantesParaVisualizar, sincronizarComprobantesViatico, eliminarComprobanteRemoto, reemplazarComprobanteRemoto } from '../services/comprobantesRemotosViaticos';
 
 const RUBROS = [['casetas','Casetas'],['estacionamiento','Estacionamiento'],['gasolina','Gasolina'],['hospedaje','Hospedaje'],['comida','Comida'],['refacciones','Refacciones'],['material','Material'],['otros','Otros']];
 const NOMBRES_DIAS = ['Lunes','Martes','Miércoles','Jueves','Viernes','Sábado','Domingo'];
@@ -23,6 +25,9 @@ function Campo({titulo,valor,cambio,placeholder='',multiline=false,teclado='defa
 }
 const Boton = ({texto,accion,secundario=false,deshabilitado=false}) => <TouchableOpacity disabled={deshabilitado} style={[s.boton,secundario&&s.botonSecundario,deshabilitado&&{opacity:0.5}]} onPress={accion}><Text style={s.botonTexto}>{texto}</Text></TouchableOpacity>;
 export default function ViaticosScreen(){
+  // App.js valida la sesión con el backend antes de montar esta pantalla.
+  // Si el perfil todavía no está disponible, no mostramos acciones destructivas.
+  const esAdministrador = obtenerPerfilSesion()?.rol === 'admin';
   const scroll=useRef(null), guardado=useRef(false), idPeticion=useRef(null);
   const [form,setForm]=useState(formularioVacio);
   const [indiceDia,setIndiceDia]=useState(0);
@@ -36,6 +41,7 @@ export default function ViaticosScreen(){
   const [errorServidor,setErrorServidor]=useState('');
   const [envioSinConfirmar,setEnvioSinConfirmar]=useState(false);
   const [cambioSinConfirmar,setCambioSinConfirmar]=useState(null);
+  const [vistaComprobantes,setVistaComprobantes]=useState(null);
   const actualizar=(campo,valor)=>setForm(a=>({...a,[campo]:valor}));
   const cambiarDia=(indice,cambio)=>setForm(a=>({...a,dias:a.dias.map((d,i)=>i===indice?{...d,...cambio}:d)}));
   const cambiarGasto=(indice,rubro,valor)=>setForm(a=>({...a,dias:a.dias.map((d,i)=>i===indice?{...d,gastos:{...d.gastos,[rubro]:valor}}:d)}));
@@ -56,6 +62,7 @@ export default function ViaticosScreen(){
     await guardarComprobantes(editarId||'borrador',lista);
   };
   const tomarComprobante=async(desdeGaleria=false)=>{
+    if(editarId)return Alert.alert('Captura ya guardada','Los comprobantes registrados se administran desde Historial → Comprobantes. El tecnico puede reintentar una carga pendiente; solo el administrador puede reemplazar o eliminar archivos ya subidos.');
     if(!dia.habilitado)return Alert.alert('Día inactivo','Activa este día antes de añadir comprobantes.');
     try {
       if(!desdeGaleria){const permiso=await ImagePicker.requestCameraPermissionsAsync();if(!permiso.granted)return Alert.alert('Permiso de cámara','Autoriza el uso de la cámara para fotografiar comprobantes.');}
@@ -66,7 +73,10 @@ export default function ViaticosScreen(){
       await guardarFotoLista([...fotos,foto]);
     }catch(e){Alert.alert('No se pudo añadir la foto',e.message);}
   };
-  const quitarFoto=(item)=>Alert.alert('Quitar comprobante','¿Eliminar esta fotografía del dispositivo?',[{text:'Cancelar',style:'cancel'},{text:'Quitar',style:'destructive',onPress:async()=>{await guardarFotoLista(fotos.filter(f=>f.id!==item.id));await quitarArchivoComprobante(item).catch(()=>{});}}]);
+  const quitarFoto=(item)=>{
+    if(editarId)return Alert.alert('Comprobante protegido','No puedes quitar aqui comprobantes de un viatico guardado.');
+    return Alert.alert('Quitar comprobante','¿Eliminar esta fotografía del dispositivo?',[{text:'Cancelar',style:'cancel'},{text:'Quitar',style:'destructive',onPress:async()=>{await guardarFotoLista(fotos.filter(f=>f.id!==item.id));await quitarArchivoComprobante(item).catch(()=>{});}}]);
+  };
   const activarFinDeSemana=(i)=>{
     if(i<5)return;
     const actual=form.dias[i];
@@ -110,6 +120,59 @@ export default function ViaticosScreen(){
     idPeticion.current=null;setEditarId(null);setForm(formularioVacio());setIndiceDia(0);
     setFotos(await leerComprobantes('borrador'));scroll.current?.scrollTo({y:0,animated:true});
   };
+  const verComprobantes=async(item)=>{
+    setOcupado(true);
+    try {
+      const vista=await obtenerComprobantesParaVisualizar(item.id);
+      setVistaComprobantes({viaticoId:String(item.id),folio:item.folio,...vista});
+    } catch(e){Alert.alert('No se pudieron consultar los comprobantes',e?.response?.data?.error||e.message);}
+    finally{setOcupado(false);}
+  };
+  const reintentarCarga=async(item)=>{
+    if(ocupado)return;
+    setOcupado(true);
+    try{
+      const locales=await leerComprobantes(item.id);
+      const estado=await sincronizarComprobantesViatico(item.id,locales,{cerrar:true});
+      const vista=await obtenerComprobantesParaVisualizar(item.id);
+      setVistaComprobantes({viaticoId:String(item.id),folio:item.folio,...vista});
+      Alert.alert('Carga sincronizada',`${estado.total} comprobante(s) verificados. Captura cerrada.`);
+    }catch(e){Alert.alert('Sincronizacion pendiente',e?.response?.data?.error||e.message+' Los archivos locales permanecen guardados.');}
+    finally{setOcupado(false);}
+  };
+  const reemplazarFotoServidor=async(item, foto)=>{
+    if(!esAdministrador)return Alert.alert('Sin permiso','Solo el administrador puede reemplazar comprobantes.');
+    if(ocupado)return;
+    try{
+      const p=await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if(!p.granted)return Alert.alert('Permiso de galeria','Autoriza el acceso para seleccionar un comprobante nuevo.');
+      const r=await ImagePicker.launchImageLibraryAsync({mediaTypes:ImagePicker.MediaTypeOptions.Images,quality:0.85,allowsEditing:false});
+      if(r.canceled||!r.assets?.[0]?.uri)return;
+      setOcupado(true);
+      // Copia nueva JPEG persistente. No borra ni sobreescribe el archivo anterior.
+      const nuevo=await copiarComprobante(r.assets[0].uri,foto.fecha,foto.concepto);
+      await reemplazarComprobanteRemoto(item.id,foto.id,nuevo.uri);
+      const vista=await obtenerComprobantesParaVisualizar(item.id);
+      setVistaComprobantes({viaticoId:String(item.id),folio:item.folio,...vista});
+      Alert.alert('Comprobante reemplazado','La imagen anterior queda conservada en Supabase para auditoria.');
+    }catch(e){Alert.alert('Reemplazo no confirmado','Comprueba el historial antes de repetirlo. '+(e?.response?.data?.error||e.message));}
+    finally{setOcupado(false);}
+  };
+  const eliminarFotoServidor=(item,foto)=>{
+    if(!esAdministrador)return Alert.alert('Sin permiso','Solo el administrador puede eliminar comprobantes.');
+    Alert.alert('Retirar comprobante','Se ocultara del historial activo, pero el archivo anterior permanecera privado para auditoria.',[
+      {text:'Cancelar',style:'cancel'},
+      {text:'Retirar',style:'destructive',onPress:async()=>{
+        setOcupado(true);
+        try{
+          await eliminarComprobanteRemoto(item.id,foto.id);
+          const vista=await obtenerComprobantesParaVisualizar(item.id);
+          setVistaComprobantes({viaticoId:String(item.id),folio:item.folio,...vista});
+        }catch(e){Alert.alert('Eliminacion no confirmada','Consulta los comprobantes antes de repetir. '+(e?.response?.data?.error||e.message));}
+        finally{setOcupado(false);}
+      }}
+    ]);
+  };
   const confirmarServidor=async(resultado,eraNuevo)=>{
     // Este paso se ejecuta SOLO después de obtener el registro de PostgreSQL.
     idPeticion.current=null;
@@ -126,11 +189,12 @@ export default function ViaticosScreen(){
     }
     return avisoFotos;
   };
-  const guardar=async(conPdf)=>{
+  const guardar=async()=>{
     if(ocupado||guardado.current)return;
     const err=validar();if(err)return Alert.alert('Revisa la comprobación',err);
     guardado.current=true;setOcupado(true);
     const eraNuevo=!editarId;
+    if(!eraNuevo && !esAdministrador){guardado.current=false;setOcupado(false);return Alert.alert('Permiso denegado','Solo el administrador puede editar viaticos guardados.');}
     let resultado;
     try {
       // Separar el guardado remoto de las operaciones de fotos y PDF:
@@ -150,17 +214,20 @@ export default function ViaticosScreen(){
         Alert.alert('Guardado no confirmado',explicarErrorViaticos(e));
         return;
       }
-      const avisoFotos=await confirmarServidor(resultado,eraNuevo);
+      let avisoFotos=await confirmarServidor(resultado,eraNuevo);
+      if (eraNuevo && !avisoFotos) {
+        // No repetir el POST del viatico si falla una foto; usar boton reintentar.
+        try { await sincronizarComprobantesViatico(resultado.id,fotos,{cerrar:fotos.length>0}); }
+        catch(e){avisoFotos=` Comprobantes aun no sincronizados: ${e?.response?.data?.error||e.message}. NO crees otro viatico; abre Historial → Comprobantes para reintentar.`;}
+      }
       try {
-        if(conPdf){
-          const uri=await generarPdfViaticos({...resultado,comprobantes:fotos});
-          await compartirPdfViaticos(uri);
-          if(avisoFotos)Alert.alert('Comprobación guardada; revisa las fotos',`Folio: ${resultado.folio}.${avisoFotos}`);
-        }else{
-          Alert.alert('Comprobación guardada',`Folio: ${resultado.folio}. ${fotos.length} foto(s) en este teléfono.${avisoFotos}`);
-        }
+        // ÚNICO flujo: PostgreSQL confirma primero, después se genera
+        // un PDF con el folio real y, si hay fotos locales, su anexo.
+        const uri=await generarPdfViaticos({...resultado,comprobantes:fotos});
+        await compartirPdfViaticos(uri);
+        if(avisoFotos)Alert.alert('Comprobación guardada; revisa las fotos',`Folio: ${resultado.folio}.${avisoFotos}`);
       }catch(e){
-        Alert.alert('Comprobación guardada; fallo del PDF',`Folio ${resultado.folio} confirmado en PostgreSQL. El PDF o el envío falló: ${e.message}${avisoFotos}`);
+        Alert.alert('Comprobación guardada; PDF pendiente',`El folio ${resultado.folio} SÍ quedó registrado en PostgreSQL. No vuelvas a crear la comprobación. Puedes generar el PDF desde Historial → PDF. Detalle: ${e.message}${avisoFotos}`);
       }
       await refrescar();
     }finally{guardado.current=false;setOcupado(false);}
@@ -178,8 +245,21 @@ export default function ViaticosScreen(){
         }
         eraNuevo=false;
       }else resultado=await comprobarViaticoPorSolicitud(idPeticion.current);
-      const avisoFotos=await confirmarServidor(resultado,eraNuevo);
-      Alert.alert('Guardado confirmado',`La comprobación sí estaba en PostgreSQL. Folio: ${resultado.folio}.${avisoFotos}`);
+      let avisoFotos=await confirmarServidor(resultado,eraNuevo);
+      if (eraNuevo && !avisoFotos) {
+        // No repetir el POST del viatico si falla una foto; usar boton reintentar.
+        try { await sincronizarComprobantesViatico(resultado.id,fotos,{cerrar:fotos.length>0}); }
+        catch(e){avisoFotos=` Comprobantes aun no sincronizados: ${e?.response?.data?.error||e.message}. NO crees otro viatico; abre Historial → Comprobantes para reintentar.`;}
+      }
+      try {
+        // Una confirmación tardía también continúa con el mismo PDF,
+        // sin reenviar POST/PUT ni consumir otro folio.
+        const uri=await generarPdfViaticos({...resultado,comprobantes:fotos});
+        await compartirPdfViaticos(uri);
+        if(avisoFotos)Alert.alert('Guardado confirmado; revisa las fotos',`Folio: ${resultado.folio}.${avisoFotos}`);
+      }catch(e){
+        Alert.alert('Guardado confirmado; PDF pendiente',`El folio ${resultado.folio} está en PostgreSQL. Puedes usar Historial → PDF sin reenviar los datos. Detalle: ${e.message}${avisoFotos}`);
+      }
       await refrescar();
     }catch(e){
       if(e?.response?.status===404){
@@ -189,6 +269,7 @@ export default function ViaticosScreen(){
   };
   const editar=async(item)=>{
     if(envioSinConfirmar||cambioSinConfirmar)return Alert.alert('Envío pendiente','Comprueba el último envío o cambio antes de editar otro viático.');
+    if(!esAdministrador)return Alert.alert('Permiso denegado','Solo el administrador puede editar viaticos ya registrados.');
     if(!item.dias?.length)return Alert.alert('Registro anterior','Este viático se creó antes del desglose diario. Su información se conserva; puedes descargar su PDF histórico.');
     idPeticion.current=null;setEditarId(item.id);
     const base=lunesSemana(item.fechaInicio);
@@ -202,11 +283,27 @@ export default function ViaticosScreen(){
     setFotos(await leerComprobantes(item.id));setIndiceDia(0);scroll.current?.scrollTo({y:0,animated:true});
   };
   const compartir=async(item)=>{
-    setOcupado(true);try{const guardadas=await leerComprobantes(item.id);const uri=await generarPdfViaticos({...item,comprobantes:guardadas});await compartirPdfViaticos(uri);}catch(e){Alert.alert('Error al compartir PDF',e.message);}finally{setOcupado(false);}
+    setOcupado(true);
+    try {
+      // Un solo PDF: incluye el resumen y los comprobantes fotográficos
+      // disponibles en este teléfono, sin volver a guardar el viático.
+      const vista=await obtenerComprobantesParaVisualizar(item.id);
+      const uri=await generarPdfViaticos({...item,comprobantes:vista.fotos});
+      await compartirPdfViaticos(uri);
+    } catch(e) {
+      Alert.alert('Error al compartir PDF',e.message);
+    } finally {setOcupado(false);}
   };
-  const eliminar=({id,folio},local=false)=>Alert.alert('Eliminar viático',`¿Eliminar ${folio}? El folio no se reutilizará.`,[{text:'Cancelar',style:'cancel'},{text:'Eliminar',style:'destructive',onPress:async()=>{
-    setOcupado(true);try{if(local){await eliminarViatico(id);setLocales(await listarViaticos());}else{await eliminarViaticoServidor(id);setHistorial(a=>a.filter(x=>String(x.id)!==String(id)));}if(String(editarId)===String(id))await nuevo();}catch(e){Alert.alert('No se pudo eliminar',e.message);}finally{setOcupado(false);}
-  }}]);
+  const eliminar=({id,folio},local=false)=>{
+    // Defensa adicional de la interfaz. El servidor valida el rol igualmente.
+    if (!esAdministrador) {
+      Alert.alert('Permiso denegado','Solo el administrador puede eliminar comprobaciones.');
+      return;
+    }
+    Alert.alert('Eliminar viático',`¿Eliminar ${folio}? El folio no se reutilizará.`,[{text:'Cancelar',style:'cancel'},{text:'Eliminar',style:'destructive',onPress:async()=>{
+      setOcupado(true);try{if(local){await eliminarViatico(id);setLocales(await listarViaticos());}else{await eliminarViaticoServidor(id);setHistorial(a=>a.filter(x=>String(x.id)!==String(id)));}if(String(editarId)===String(id))await nuevo();}catch(e){Alert.alert('No se pudo eliminar',e.message);}finally{setOcupado(false);}
+    }}]);
+  };
   return <ScrollView ref={scroll} style={s.pantalla} contentContainerStyle={s.contenido} keyboardShouldPersistTaps="handled">
     <Text style={s.titulo}>Comprobación semanal de viáticos</Text><Text style={s.ayuda}>Registra los gastos realmente realizados de lunes a viernes. Activa sábado o domingo cuando haya servicios. Un folio por semana y comprobantes por día.</Text>
     {errorServidor?<Text style={s.advertencia}>{errorServidor}</Text>:null}
@@ -230,10 +327,10 @@ export default function ViaticosScreen(){
         {RUBROS.map(([id,nombre])=><Campo key={`${dia.fecha}-${id}`} titulo={nombre} valor={dia.gastos[id]} cambio={v=>cambiarGasto(indiceDia,id,v)} placeholder="0.00" teclado="decimal-pad"/>)}
         <View style={s.totalFila}><Text style={s.etiqueta}>Total comprobado del día</Text><Text style={s.totalValor}>{dinero(montoDia(indiceDia))}</Text></View>
         <Text style={s.subtitulo}>Comprobantes fotográficos</Text>
-        <Text style={s.ayuda}>Elige a qué gasto corresponde cada foto. Se conserva en este teléfono; no se sube al servidor.</Text>
+        <Text style={s.ayuda}>Elige el gasto de cada foto. Al crear el viatico se intentara subir una copia al almacenamiento privado; los originales seguiran en este telefono. Si falla Internet, puedes reintentar sin crear otro folio.</Text>
         <View style={s.conceptos}>{RUBROS.map(([id,nombre])=><TouchableOpacity key={id} style={[s.rubroChip,conceptoFoto===id&&s.chipActivo]} onPress={()=>setConceptoFoto(id)}><Text style={s.chipTexto}>{nombre}</Text></TouchableOpacity>)}</View>
-        <View style={s.botonesFoto}><TouchableOpacity onPress={()=>tomarComprobante(false)} style={s.fotoBoton}><Text style={s.botonTexto}>📷 Tomar foto</Text></TouchableOpacity><TouchableOpacity onPress={()=>tomarComprobante(true)} style={s.fotoBoton}><Text style={s.botonTexto}>Galería</Text></TouchableOpacity></View>
-        <View style={s.fotosLista}>{fotos.filter(f=>f.fecha===dia.fecha).map(item=><View key={item.id} style={s.fotoItem}><Image source={{uri:item.uri}} style={s.fotoMini}/><Text style={s.fotoEtiqueta}>{RUBROS.find(([r])=>r===item.concepto)?.[1]||item.concepto}</Text><TouchableOpacity onPress={()=>quitarFoto(item)}><Text style={s.rojo}>Quitar</Text></TouchableOpacity><TouchableOpacity onPress={()=>Sharing.shareAsync(item.uri).catch(e=>Alert.alert('Error',e.message))}><Text style={s.link}>Enviar</Text></TouchableOpacity></View>)}</View>
+        {!editarId?<View style={s.botonesFoto}><TouchableOpacity onPress={()=>tomarComprobante(false)} style={s.fotoBoton}><Text style={s.botonTexto}>📷 Tomar foto</Text></TouchableOpacity><TouchableOpacity onPress={()=>tomarComprobante(true)} style={s.fotoBoton}><Text style={s.botonTexto}>Galería</Text></TouchableOpacity></View>:<Text style={s.ayuda}>Viatico guardado: consulta o administra sus comprobantes desde Historial → Comprobantes.</Text>}
+        <View style={s.fotosLista}>{fotos.filter(f=>f.fecha===dia.fecha).map(item=><View key={item.id} style={s.fotoItem}><Image source={{uri:item.uri}} style={s.fotoMini}/><Text style={s.fotoEtiqueta}>{RUBROS.find(([r])=>r===item.concepto)?.[1]||item.concepto}</Text>{!editarId?<TouchableOpacity onPress={()=>quitarFoto(item)}><Text style={s.rojo}>Quitar</Text></TouchableOpacity>:null}<TouchableOpacity onPress={()=>Sharing.shareAsync(item.uri).catch(e=>Alert.alert('Error',e.message))}><Text style={s.link}>Enviar</Text></TouchableOpacity></View>)}</View>
       </>:<Text style={s.ayuda}>Día no incluido.</Text>}
       <Text style={s.subtitulo}>Resumen de visitas y proyectos por día</Text>
       <ScrollView horizontal showsHorizontalScrollIndicator style={{marginBottom:10}}>
@@ -248,16 +345,28 @@ export default function ViaticosScreen(){
       <Campo titulo="Observaciones (opcional)" valor={form.observaciones} cambio={v=>actualizar('observaciones',v)} multiline/>
     </View>
     {(envioSinConfirmar||cambioSinConfirmar)?<View style={s.tarjeta}><Text style={s.advertencia}>El último envío o cambio no recibió confirmación. Comprueba primero si Render lo registró para evitar errores o duplicados.</Text><Boton texto="Comprobar último envío o cambio" accion={comprobarUltimoEnvio} deshabilitado={ocupado}/></View>:null}
-    <Boton texto={ocupado?'Guardando...':editarId?'Guardar cambios en PostgreSQL':'Guardar comprobación en PostgreSQL'} accion={()=>guardar(false)} deshabilitado={ocupado}/>
-    <Boton texto="Guardar y compartir comprobación PDF" accion={()=>guardar(true)} deshabilitado={ocupado} secundario/>
+    <Boton texto={ocupado?'Guardando, sincronizando y preparando PDF...':editarId?'Guardar cambios y generar PDF':'Guardar comprobación y generar PDF'} accion={guardar} deshabilitado={ocupado||Boolean(editarId&&!esAdministrador)}/>
+    {editarId&&!esAdministrador?<Text style={s.ayuda}>Esta comprobacion ya esta guardada: solo el administrador puede editar los datos. Puedes ver sus fotos y PDF desde Historial, o crear una nueva comprobacion.</Text>:null}
+    <Text style={s.ayuda}>Guardar en PostgreSQL, sincronizar fotos privadas y generar PDF. Si falla una subida, el folio permanece guardado, las fotos originales siguen en el telefono y se pueden reintentar desde Historial → Comprobantes.</Text>
     <TouchableOpacity onPress={nuevo} disabled={ocupado} style={s.nuevo}><Text style={s.link}>+ Nueva comprobación semanal</Text></TouchableOpacity>
     <View style={s.tarjeta}><Text style={s.subtitulo}>Historial de comprobaciones en PostgreSQL</Text><TouchableOpacity onPress={refrescar} disabled={ocupado}><Text style={s.link}>Actualizar historial</Text></TouchableOpacity>
-      {cargando?<ActivityIndicator/>:historial.length===0?<Text style={s.ayuda}>Sin registros.</Text>:historial.map(item=><View key={String(item.id)} style={s.historial}><Text style={s.subtitulo}>{item.folio} · {dinero(item.total)}</Text><Text>{item.empleado} · {item.destino}</Text><Text style={s.ayuda}>{item.fechaInicio} a {item.fechaFin}</Text><View style={s.acciones}><TouchableOpacity onPress={()=>editar(item)} disabled={ocupado}><Text style={s.link}>Editar</Text></TouchableOpacity><TouchableOpacity onPress={()=>compartir(item)} disabled={ocupado}><Text style={s.link}>PDF</Text></TouchableOpacity><TouchableOpacity onPress={()=>eliminar(item)} disabled={ocupado}><Text style={s.rojo}>Eliminar</Text></TouchableOpacity></View></View>)}
+      {cargando?<ActivityIndicator/>:historial.length===0?<Text style={s.ayuda}>Sin registros.</Text>:historial.map(item=><View key={String(item.id)} style={s.historial}><Text style={s.subtitulo}>{item.folio} · {dinero(item.total)}</Text><Text>{item.empleado} · {item.destino}</Text><Text style={s.ayuda}>{item.fechaInicio} a {item.fechaFin}</Text><View style={s.acciones}>{esAdministrador?<TouchableOpacity onPress={()=>editar(item)} disabled={ocupado}><Text style={s.link}>Editar</Text></TouchableOpacity>:null}<TouchableOpacity onPress={()=>verComprobantes(item)} disabled={ocupado}><Text style={s.link}>Comprobantes</Text></TouchableOpacity><TouchableOpacity onPress={()=>compartir(item)} disabled={ocupado}><Text style={s.link}>PDF</Text></TouchableOpacity>{esAdministrador?<TouchableOpacity onPress={()=>eliminar(item)} disabled={ocupado}><Text style={s.rojo}>Eliminar</Text></TouchableOpacity>:null}</View>
+      {vistaComprobantes?.viaticoId===String(item.id)?<View style={{padding:9,backgroundColor:'#eaf4fc',borderRadius:7,marginTop:9}}>
+        <Text style={s.ayuda}>Captura: {vistaComprobantes.estadoCaptura||'historica'} · {vistaComprobantes.remotos.length} comprobante(s) en servidor. {vistaComprobantes.fotos.length} disponible(s) para visualizar.</Text>
+        {vistaComprobantes.fotos.map(foto=><View key={String(foto.id)} style={{marginBottom:12,padding:8,backgroundColor:'#fff',borderRadius:8}}>
+          <Text>{foto.fecha} · {RUBROS.find(([r])=>r===foto.concepto)?.[1]||foto.concepto} {foto.pendiente?'· Pendiente de subir':''}</Text>
+          <Image source={{uri:foto.uri}} style={{width:'100%',height:170,resizeMode:'contain',marginTop:6}} />
+          {esAdministrador&&foto.remoto?<View style={s.acciones}><TouchableOpacity disabled={ocupado} onPress={()=>reemplazarFotoServidor(item,foto)}><Text style={s.link}>Reemplazar</Text></TouchableOpacity><TouchableOpacity disabled={ocupado} onPress={()=>eliminarFotoServidor(item,foto)}><Text style={s.rojo}>Retirar</Text></TouchableOpacity></View>:null}
+        </View>)}
+        {vistaComprobantes.estadoCaptura==='pendiente'?<Boton texto="Sincronizar pendientes y cerrar captura" accion={()=>reintentarCarga(item)} deshabilitado={ocupado}/>:null}
+        <TouchableOpacity onPress={()=>setVistaComprobantes(null)}><Text style={s.link}>Cerrar vista</Text></TouchableOpacity>
+      </View>:null}
+      </View>)}
     </View>
-    {locales.length?<View style={s.tarjeta}><Text style={s.subtitulo}>Comprobaciones anteriores (solo locales)</Text>{locales.map(item=><View key={String(item.id)} style={s.historial}><Text>{item.folio} · {dinero(item.total)}</Text><View style={s.acciones}><TouchableOpacity onPress={()=>compartir(item)}><Text style={s.link}>PDF antiguo</Text></TouchableOpacity><TouchableOpacity onPress={()=>eliminar(item,true)}><Text style={s.rojo}>Eliminar</Text></TouchableOpacity></View></View>)}</View>:null}
-    <Text style={s.advertencia}>Las fotos de comprobantes se conservan solo en este dispositivo. No desinstales la app si aún no las has respaldado. El backend actual carece de autenticación: no subas imágenes con datos personales hasta proteger el acceso.</Text>
+    {locales.length?<View style={s.tarjeta}><Text style={s.subtitulo}>Comprobaciones anteriores (solo locales)</Text>{locales.map(item=><View key={String(item.id)} style={s.historial}><Text>{item.folio} · {dinero(item.total)}</Text><View style={s.acciones}><TouchableOpacity onPress={()=>compartir(item)}><Text style={s.link}>PDF antiguo</Text></TouchableOpacity>{esAdministrador?<TouchableOpacity onPress={()=>eliminar(item,true)}><Text style={s.rojo}>Eliminar</Text></TouchableOpacity>:null}</View></View>)}</View>:null}
+    <Text style={s.advertencia}>Los originales siguen guardados en este telefono. Los comprobantes sincronizados se conservan en un bucket privado de Supabase y son accesibles con sesion. Los viaticos anteriores a esta integracion no se sincronizan automaticamente; requieren una migracion administrativa. No desinstales la app con capturas pendientes.</Text>
   </ScrollView>;
 }
 const s=StyleSheet.create({
-  pantalla:{flex:1,backgroundColor:'#f4f7fa'},contenido:{padding:16,paddingBottom:30},titulo:{fontSize:23,color:'#123b61',fontWeight:'800',marginBottom:7},subtitulo:{fontSize:17,color:'#174b73',fontWeight:'700',marginTop:8,marginBottom:10},ayuda:{fontSize:12,color:'#64748b',lineHeight:18,marginBottom:12},tarjeta:{backgroundColor:'#fff',padding:15,borderRadius:12,marginTop:14,elevation:2},campo:{marginBottom:12},etiqueta:{fontSize:13,fontWeight:'700',color:'#25364a',marginBottom:5},entrada:{borderWidth:1,borderColor:'#ccd5df',borderRadius:8,paddingHorizontal:11,paddingVertical:9,minHeight:42,color:'#1e293b',backgroundColor:'#fff'},area:{minHeight:64},folio:{borderWidth:1,borderColor:'#cdd8e3',padding:12,borderRadius:8,marginBottom:13,color:'#254862'},semanaNav:{flexDirection:'row',justifyContent:'space-between',alignItems:'center',gap:6,marginBottom:12},semanaTexto:{fontSize:11,color:'#334155',textAlign:'center',flex:1},link:{color:'#1565a0',fontWeight:'700',fontSize:12},diasLista:{flexDirection:'row',flexWrap:'wrap',gap:6,marginBottom:12},diaBoton:{width:'31%',padding:8,borderRadius:8,borderWidth:1,borderColor:'#cbd5e1',backgroundColor:'#f8fafc'},diaElegido:{borderColor:'#1c6e9e',backgroundColor:'#e5f3ff'},diaInactivo:{opacity:0.6},diaTexto:{fontWeight:'700',fontSize:12,color:'#23405d'},diaMonto:{fontSize:10,color:'#5b6f81',marginTop:4},totalFila:{flexDirection:'row',justifyContent:'space-between',padding:12,backgroundColor:'#e6f3fa',borderRadius:8,marginTop:9},totalValor:{fontSize:15,fontWeight:'800',color:'#17466b'},resumenFila:{flexDirection:'row',justifyContent:'space-between',paddingVertical:6,borderBottomColor:'#edf2f7',borderBottomWidth:1},conceptos:{flexDirection:'row',flexWrap:'wrap',gap:6,marginBottom:10},rubroChip:{paddingHorizontal:9,paddingVertical:7,borderRadius:20,backgroundColor:'#eef2f7'},chipActivo:{backgroundColor:'#9fddfb'},chipTexto:{fontSize:11,color:'#153958'},botonesFoto:{flexDirection:'row',gap:8,marginBottom:12},fotoBoton:{backgroundColor:'#286993',padding:12,flex:1,alignItems:'center',borderRadius:8},fotosLista:{flexDirection:'row',flexWrap:'wrap',gap:8},fotoItem:{width:112,padding:5,backgroundColor:'#f8fafc',borderRadius:8,alignItems:'center',gap:3},fotoMini:{width:95,height:100,borderRadius:6},fotoEtiqueta:{fontSize:11,color:'#334155'},rojo:{color:'#b12828',fontWeight:'700',fontSize:12},boton:{padding:14,backgroundColor:'#176a9a',alignItems:'center',borderRadius:9,marginTop:14},botonSecundario:{backgroundColor:'#13765a'},botonTexto:{color:'#fff',fontWeight:'800'},nuevo:{padding:16,alignItems:'center'},historial:{borderTopWidth:1,borderTopColor:'#e2e8f0',paddingVertical:11},acciones:{flexDirection:'row',gap:25,marginTop:9},advertencia:{fontSize:12,color:'#86521b',lineHeight:18,marginTop:15,padding:8,backgroundColor:'#fff5df',borderRadius:7},cuadriculaFila:{flexDirection:'row'},cuadriculaCelda:{width:104,minHeight:48,borderWidth:0.5,borderColor:'#cbd5e1',padding:6,color:'#334155',fontSize:11},cuadriculaPrimera:{width:128,fontWeight:'700'},cuadriculaCabecera:{minHeight:33,fontWeight:'700',backgroundColor:'#e9f3f9',color:'#174b73'}
+  pantalla:{flex:1,backgroundColor:'#f4f7fa'},contenido:{padding:16,paddingBottom:30},titulo:{fontSize:23,color:'#123b61',fontWeight:'800',marginBottom:7},subtitulo:{fontSize:17,color:'#174b73',fontWeight:'700',marginTop:8,marginBottom:10},ayuda:{fontSize:12,color:'#64748b',lineHeight:18,marginBottom:12},tarjeta:{backgroundColor:'#fff',padding:15,borderRadius:12,marginTop:14,elevation:2},campo:{marginBottom:12},etiqueta:{fontSize:13,fontWeight:'700',color:'#25364a',marginBottom:5},entrada:{borderWidth:1,borderColor:'#ccd5df',borderRadius:8,paddingHorizontal:11,paddingVertical:9,minHeight:42,color:'#1e293b',backgroundColor:'#fff'},area:{minHeight:64},folio:{borderWidth:1,borderColor:'#cdd8e3',padding:12,borderRadius:8,marginBottom:13,color:'#254862'},semanaNav:{flexDirection:'row',justifyContent:'space-between',alignItems:'center',gap:6,marginBottom:12},semanaTexto:{fontSize:11,color:'#334155',textAlign:'center',flex:1},link:{color:'#1565a0',fontWeight:'700',fontSize:12},diasLista:{flexDirection:'row',flexWrap:'wrap',gap:6,marginBottom:12},diaBoton:{width:'31%',padding:8,borderRadius:8,borderWidth:1,borderColor:'#cbd5e1',backgroundColor:'#f8fafc'},diaElegido:{borderColor:'#1c6e9e',backgroundColor:'#e5f3ff'},diaInactivo:{opacity:0.6},diaTexto:{fontWeight:'700',fontSize:12,color:'#23405d'},diaMonto:{fontSize:10,color:'#5b6f81',marginTop:4},totalFila:{flexDirection:'row',justifyContent:'space-between',padding:12,backgroundColor:'#e6f3fa',borderRadius:8,marginTop:9},totalValor:{fontSize:15,fontWeight:'800',color:'#17466b'},resumenFila:{flexDirection:'row',justifyContent:'space-between',paddingVertical:6,borderBottomColor:'#edf2f7',borderBottomWidth:1},conceptos:{flexDirection:'row',flexWrap:'wrap',gap:6,marginBottom:10},rubroChip:{paddingHorizontal:9,paddingVertical:7,borderRadius:20,backgroundColor:'#eef2f7'},chipActivo:{backgroundColor:'#9fddfb'},chipTexto:{fontSize:11,color:'#153958'},botonesFoto:{flexDirection:'row',gap:8,marginBottom:12},fotoBoton:{backgroundColor:'#286993',padding:12,flex:1,alignItems:'center',borderRadius:8},fotosLista:{flexDirection:'row',flexWrap:'wrap',gap:8},fotoItem:{width:112,padding:5,backgroundColor:'#f8fafc',borderRadius:8,alignItems:'center',gap:3},fotoMini:{width:95,height:100,borderRadius:6},fotoEtiqueta:{fontSize:11,color:'#334155'},rojo:{color:'#b12828',fontWeight:'700',fontSize:12},boton:{padding:14,backgroundColor:'#176a9a',alignItems:'center',borderRadius:9,marginTop:14},botonSecundario:{backgroundColor:'#13765a'},botonTexto:{color:'#fff',fontWeight:'800'},nuevo:{padding:16,alignItems:'center'},historial:{borderTopWidth:1,borderTopColor:'#e2e8f0',paddingVertical:11},acciones:{flexDirection:'row',flexWrap:'wrap',columnGap:19,rowGap:10,marginTop:9},advertencia:{fontSize:12,color:'#86521b',lineHeight:18,marginTop:15,padding:8,backgroundColor:'#fff5df',borderRadius:7},cuadriculaFila:{flexDirection:'row'},cuadriculaCelda:{width:104,minHeight:48,borderWidth:0.5,borderColor:'#cbd5e1',padding:6,color:'#334155',fontSize:11},cuadriculaPrimera:{width:128,fontWeight:'700'},cuadriculaCabecera:{minHeight:33,fontWeight:'700',backgroundColor:'#e9f3f9',color:'#174b73'}
 });

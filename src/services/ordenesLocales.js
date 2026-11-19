@@ -115,6 +115,46 @@ export const leerOrdenLocal = async (folio, empresaId) => {
   return JSON.parse(disponibles[0]);
 };
 
+// Busca una copia local que pertenezca al MISMO ID de PostgreSQL.
+// Evita tomar por coincidencia de folio las fotos y datos de otra empresa.
+// Para archivos muy antiguos sin backendId solo acepta una copia de la
+// empresa que indica el servidor; las copias discrepantes NO se borran.
+export const leerOrdenLocalAsociada = async (folio, backendId, empresaRemotaId) => {
+  const id = Number(backendId);
+  if (!Number.isSafeInteger(id) || id <= 0) return null;
+  const copias = (await Promise.all(
+    EMPRESAS.map((e) => leerOrdenLocal(folio, e.id))
+  )).filter(Boolean);
+  const vinculadas = copias.filter((copia) =>
+    Number.isSafeInteger(Number(copia.backendId)) &&
+    Number(copia.backendId) === id
+  );
+  if (vinculadas.length === 1) return vinculadas[0];
+  if (vinculadas.length > 1) return null; // Vínculo ambiguo: no adivinar.
+
+  const antiguas = copias.filter((copia) =>
+    (copia.backendId == null || copia.backendId === '') &&
+    copia.empresaId === empresaRemotaId
+  );
+  return antiguas.length === 1 ? antiguas[0] : null;
+};
+
+// Solo cambia metadatos de una orden guardada; jamás borra fotos ni firmas.
+// No se crea aquí un ID remoto ni se asigna folio.
+export const guardarEstadoSincronizacion = async (folio, empresaId, backendId, estado, detalle = '') => {
+  if (!Number.isSafeInteger(Number(backendId)) || Number(backendId) <= 0) {
+    throw new Error('No se puede sincronizar sin ID de PostgreSQL.');
+  }
+  const local = await leerOrdenLocal(folio, empresaId);
+  if (!local) throw new Error('La copia local no está disponible; no se alterarán evidencias.');
+  await guardarOrdenLocal({
+    ...local,
+    backendId: Number(backendId),
+    sincronizacionEvidencias: estado,
+    errorSincronizacion: String(detalle || '')
+  });
+};
+
 export const nombreEmpresa = (empresaId) =>
   EMPRESAS.find((e) => e.id === empresaId)?.nombre || 'Empresa sin especificar';
 

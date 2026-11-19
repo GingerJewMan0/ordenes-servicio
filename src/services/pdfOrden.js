@@ -79,13 +79,28 @@ const aDataUri = async (origen) => {
   return null;
 };
 
-const cuadriculaFotos = (titulo, fotos) => `
-  <section class="nueva-pagina">
-    <h2>${escapar(titulo)}</h2>
-    <div class="fotos">${fotos.length ? fotos.map((foto, i) => `
-      <div class="foto"><img src="${foto}" /><div>Fotografía ${i + 1}</div></div>
-    `).join('') : '<p>No hay fotografías registradas.</p>'}</div>
-  </section>`;
+// Cada hoja de evidencia tiene su propio pie. Evita position:fixed,
+// que algunos motores de impresión Android colocan sobre las fotografías.
+// Ajusta el alto de las imágenes según cuántas fotos hay en la página,
+// sin recortar el contenido original (object-fit: contain).
+const cuadriculaFotos = (titulo, fotos, pieEmpresa) => {
+  const porHoja = 6; // Dos columnas x tres filas por página carta.
+  const lotes = [];
+  for (let inicio = 0; inicio < fotos.length; inicio += porHoja) {
+    lotes.push({ fotos: fotos.slice(inicio, inicio + porHoja), inicio });
+  }
+  if (!lotes.length) lotes.push({ fotos: [], inicio: 0 });
+  return lotes.map(({ fotos: lote, inicio }, indice) => `
+    <section class="pagina pagina-fotos">
+      <div class="contenido-pagina">
+        <h2>${escapar(titulo)}${indice ? ' (continuación)' : ''}</h2>
+        <div class="fotos fotos--${lote.length}">${lote.length ? lote.map((foto, i) => `
+          <div class="foto"><img src="${foto}" /><div>Fotografía ${inicio + i + 1}</div></div>
+        `).join('') : '<p>No hay fotografías registradas.</p>'}</div>
+      </div>
+      ${pieEmpresa}
+    </section>`).join('');
+};
 
 const bloqueFirma = (uri, nombre) => uri
   ? `<div class="firma"><img src="${uri}" /><div class="linea"></div><strong>${escapar(nombre || '—')}</strong></div>`
@@ -126,41 +141,83 @@ export const generarPdfOrden = async (orden) => {
     : new Date().toLocaleString('es-MX');
   const marcaModelo = form.marca_modelo || [form.marca, form.modelo].filter(Boolean).join(' / ');
   const recomendaciones = form.recomendaciones ?? form.observaciones_mtto_correctivo;
+  // Un pie independiente dentro de cada hoja: nunca se posiciona sobre otras páginas.
+  const pieEmpresa = `<footer class="pie-empresa">
+      <strong>${escapar(empresa)}</strong>
+      <div>Dirección: ${texto(contacto?.direccion, 'Pendiente de configurar')}</div>
+      <div>Teléfono: ${texto(contacto?.telefono, 'Pendiente de configurar')}
+      &nbsp; | &nbsp; Email: ${texto(contacto?.email, 'Pendiente de configurar')}</div>
+    </footer>`;
+
   const html = `<!doctype html><html><head><meta charset="utf-8"/>
   <style>
-  @page { size: A4; margin: 14mm 14mm 29mm; }
+  /* Carta 612 x 792 pt; los bloques se compactan para reservar espacio
+     real para las firmas y el pie en la PRIMERA hoja. */
+  @page { size: letter; margin: 0; }
   * { box-sizing: border-box; }
-  body { font-family: Arial, sans-serif; color:#172638; font-size:11px; margin:0; }
-  header { display:flex; align-items:center; gap:15px; padding-bottom:12px; border-bottom:3px solid #2563a6; }
-  header img { width:108px; height:70px; object-fit:contain; }
-  h1 { font-size:20px; margin:0; color:#1e4e81; }
-  h2 { margin:15px 0 7px; font-size:13px; color:#1e4e81; border-bottom:1px solid #cbd5e1; padding-bottom:4px; }
-  .sub { margin-top:6px; color:#485566; }
-  .datos { display:grid; grid-template-columns:1fr 1fr; gap:7px 16px; }
+  html, body { margin:0; padding:0; }
+  body { font-family: Arial, sans-serif; color:#172638; font-size:11.1px; }
+  .pagina {
+    width:215.9mm;
+    min-height:275mm; /* margen de seguridad para los saltos de pagina de Android */
+    padding:8mm 12mm 7mm;
+    display:flex;
+    flex-direction:column;
+    page-break-after:always;
+    break-after:page;
+  }
+  .pagina:last-child { page-break-after:auto; break-after:auto; }
+  .contenido-pagina { flex:1 0 auto; }
+  header { display:flex; align-items:center; gap:11px; padding-bottom:6px; border-bottom:2px solid #2563a6; }
+  header img { width:94px; height:50px; object-fit:contain; }
+  h1 { font-size:17px; margin:0; color:#1e4e81; }
+  h2 { margin:9px 0 5px; font-size:12.5px; color:#1e4e81; border-bottom:1px solid #cbd5e1; padding-bottom:2px; }
+  .sub { margin-top:1px; color:#485566; }
+  .datos { display:grid; grid-template-columns:1fr 1fr; gap:5px 12px; }
   .dato { overflow-wrap:anywhere; }
   .bloque { break-inside:avoid; page-break-inside:avoid; }
-  .observ { white-space:pre-wrap; overflow-wrap:anywhere; padding:8px; background:#f1f5f9; border-radius:5px; }
-  .firmas { display:flex; gap:24px; margin-top:22px; break-inside:avoid; }
-  .firma { flex:1; text-align:center; } .firma img { width:100%; height:88px; object-fit:contain; }
-  .linea { height:1px; background:#566; margin:2px 0 7px; }
-  .sin-firma { height:88px; display:flex; align-items:end; justify-content:center; }
-  .nueva-pagina { page-break-before:always; }
-  .fotos { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
-  .foto { border:1px solid #d6e0e8; padding:8px; text-align:center; break-inside:avoid; }
-  .foto img { display:block; width:100%; height:205px; object-fit:contain; }
-  .foto div { margin-top:5px; font-size:10px; }
-  .pie-empresa { position:fixed; bottom:-22mm; left:0; right:0;
-    border-top:1px solid #9eb4c9; padding-top:6px; font-size:9px;
-    line-height:1.45; color:#40566d; text-align:center; background:white;
-    overflow-wrap:anywhere; }
-  .pie-empresa strong { color:#1e4e81; }
+  .observ { white-space:pre-wrap; overflow-wrap:anywhere; padding:5px 8px; background:#f1f5f9; border-radius:5px; }
+  .firmas { display:flex; gap:20px; margin-top:8px; break-inside:avoid; }
+  .firma { flex:1; text-align:center; } .firma img { width:100%; height:60px; object-fit:contain; }
+  .linea { height:1px; background:#566; margin:2px 0 5px; }
+  .sin-firma { height:60px; display:flex; align-items:end; justify-content:center; }
+  /* 6 fotos por hoja, pero las hojas con 1-4 fotos aprovechan mejor el espacio. */
+  .pagina-fotos .contenido-pagina { min-height:0; }
+  .fotos { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  .foto {
+    min-width:0;
+    border:1px solid #d6e0e8;
+    border-radius:5px;
+    padding:9px;
+    text-align:center;
+    break-inside:avoid;
+    page-break-inside:avoid;
+  }
+  .foto img { display:block; width:100%; height:178px; object-fit:contain; }
+  .foto div { margin-top:5px; font-size:11px; font-weight:600; color:#40566d; }
+  .fotos--1 .foto { grid-column:1 / -1; }
+  .fotos--1 .foto img { height:540px; }
+  .fotos--2 .foto img { height:510px; }
+  .fotos--3 .foto img, .fotos--4 .foto img { height:308px; }
+  .fotos--3 .foto:last-child { grid-column:1 / -1; }
+  .fotos--5 .foto img, .fotos--6 .foto img { height:180px; }
+  .pie-empresa {
+    flex:0 0 auto;
+    margin-top:2.5mm;
+    padding:5px 8px;
+    border-top:2px solid #8eaac4;
+    background:#f5f9fc;
+    font-size:9.5px;
+    line-height:1.3;
+    color:#34475e;
+    text-align:left;
+    overflow-wrap:anywhere;
+    page-break-inside:avoid;
+    break-inside:avoid;
+  }
+  .pie-empresa strong { display:block; color:#1e4e81; font-size:10px; margin-bottom:1px; }
   </style></head><body>
-  <footer class="pie-empresa">
-    <strong>${escapar(empresa)}</strong><br/>
-    Dirección: ${texto(contacto?.direccion, 'Pendiente de configurar')} &nbsp; | &nbsp;
-    Teléfono: ${texto(contacto?.telefono, 'Pendiente de configurar')} &nbsp; | &nbsp;
-    Email: ${texto(contacto?.email, 'Pendiente de configurar')}
-  </footer>
+  <section class="pagina pagina-orden"><div class="contenido-pagina">
   <header>${logo ? `<img src="${logo}"/>` : ''}<div><h1>ORDEN DE SERVICIO</h1>
     <div><b>${escapar(empresa)}</b></div><div class="sub">Folio: ${texto(form.folio_orden)} · ${escapar(fecha)}</div></div></header>
   <h2>Datos generales</h2><div class="datos">
@@ -187,12 +244,12 @@ export const generarPdfOrden = async (orden) => {
   <h2>Firmas</h2><div class="firmas">
     ${bloqueFirma(firmaTecnico, `Técnico: ${form.tecnico_servicio || '—'}`)}
     ${bloqueFirma(firmaResponsable, `Responsable: ${form.responsable_unidad || '—'}`)}
-  </div>
-  ${cuadriculaFotos('Evidencia fotográfica — ANTES', fotosAntes.filter(Boolean))}
-  ${cuadriculaFotos('Evidencia fotográfica — DESPUÉS', fotosDespues.filter(Boolean))}
+  </div></div>${pieEmpresa}</section>
+  ${cuadriculaFotos('Evidencia fotográfica — ANTES', fotosAntes.filter(Boolean), pieEmpresa)}
+  ${cuadriculaFotos('Evidencia fotográfica — DESPUÉS', fotosDespues.filter(Boolean), pieEmpresa)}
   </body></html>`;
-
-  const resultado = await Print.printToFileAsync({ html, base64: false });
+  // Fijar carta explicitamente: coincide con las dimensiones CSS de cada hoja.
+  const resultado = await Print.printToFileAsync({ html, base64: false, width: 612, height: 792 });
   const carpeta = `${FileSystem.documentDirectory}ordenesServicio/pdfs/`;
   await FileSystem.makeDirectoryAsync(carpeta, { intermediates: true });
   const nombre = `Orden-${String(form.folio_orden || 'sin-folio').replace(/[^0-9A-Za-z_-]/g, '')}-${orden.empresaId || 'empresa'}.pdf`;

@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { obtenerToken, caducarSesion } from './authSesion';
 
 // Backend de viáticos independiente de la URL de órdenes de servicio.
 export const API_VIATICOS_URL = 'https://ordenes-viaticos-test.onrender.com/api/viaticos';
@@ -6,6 +7,18 @@ export const API_VIATICOS_URL = 'https://ordenes-viaticos-test.onrender.com/api/
 // Render Free puede tardar más de 30 s en reactivarse.
 // No se reintenta automáticamente un POST: podría haberse guardado.
 const cliente = axios.create({ timeout: 90000 });
+cliente.interceptors.request.use(async (config) => {
+  const token = await obtenerToken();
+  if (token) {
+    config.headers = config.headers || {};
+    config.headers.Authorization = `Bearer ${token}`;
+  }
+  return config;
+});
+cliente.interceptors.response.use((r) => r, async (error) => {
+  if (error?.response?.status === 401) await caducarSesion();
+  return Promise.reject(error);
+});
 
 const unwrap = (respuesta) => {
   const fila = respuesta?.data?.viatico;
@@ -25,6 +38,8 @@ export const explicarErrorViaticos = (error) => {
   if (typeof mensaje === 'string' && mensaje.trim()) {
     return `Servidor HTTP ${status}: ${mensaje}`;
   }
+  if (status === 401) return 'Tu sesión caducó. Vuelve a iniciar sesión.';
+  if (status === 403) return 'No tienes permiso para realizar esta acción.';
   if (status === 404) return 'El viático solicitado o la ruta de la API no existe (HTTP 404).';
   if (status === 409) return 'El servidor encontró un conflicto (HTTP 409). Comprueba el historial antes de repetir el envío.';
   if (status >= 400 && status < 500) return `El servidor rechazó los datos (HTTP ${status}).`;
