@@ -7,6 +7,7 @@ const crearRouterComprobantesViaticos = require('./routes/comprobantesViaticos')
 const { crearSeguridad } = require('./security/sesiones');
 const { crearRouterAdminUsuarios } = require('./routes/adminUsuarios');
 const { crearRouterReportesHospitalarios } = require('./routes/reportesHospitalarios');
+const { crearRouterAccesoHospital } = require('./routes/accesoHospital');
 require('dotenv').config();
 
 const app = express();
@@ -37,6 +38,7 @@ app.get('/hospital/:token', (req, res) => {
   res.set('Content-Security-Policy', "default-src 'none'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'");
   return res.sendFile(path.join(__dirname, 'public', 'hospital', 'index.html'));
 });
+app.use('/acceso', crearRouterAccesoHospital(pool));
 
 // Login y permisos. Montar ANTES de las rutas de órdenes y viáticos.
 // TRANSICIÓN: APP_AUTH_REQUIRED=false mantiene los APK actuales funcionando.
