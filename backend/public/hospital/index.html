@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Reporte de equipo | Servicio Técnico</title>
+  <link rel="stylesheet" href="/hospital-assets/style.css">
+  <script defer src="/hospital-assets/app.js"></script>
+</head>
+<body>
+ <header class="header">
+  <div class="brand"><span class="logo">✚</span><span><strong>Servicio Técnico</strong><small>Reporte de equipos hospitalarios</small></span></div>
+  <span class="tag">Portal hospitalario</span>
+ </header>
+ <main class="wrap">
+  <div class="intro">
+   <p class="eyebrow">SOLICITUD DE ATENCIÓN</p>
+   <h1>Reportar un equipo</h1>
+   <p>Registra fallas, mantenimiento pendiente, instalaciones o aperturas. Tu solicitud llegará al equipo administrador de Servicio Técnico.</p>
+  </div>
+  <div class="hospital-line" aria-live="polite">
+    <span class="hospital-icon">▣</span><div><small>Hospital seleccionado</small><strong id="hospital-name">Validando enlace…</strong></div>
+    <span id="hospital-state" class="status">Validando</span>
+  </div>
+  <div id="alert" class="alert" role="alert" hidden></div>
+  <section id="success" class="success" hidden aria-live="polite">
+    <div class="success-icon">✓</div>
+    <h2>¡Reporte enviado!</h2>
+    <p>La solicitud quedó registrada para revisión de los administradores.</p>
+    <div class="receipt">Folio de reporte <strong id="folio"></strong></div>
+    <p class="tiny">Guarda este folio para cualquier seguimiento con Servicio Técnico.</p>
+    <button type="button" id="nuevo" class="secondary">Registrar otro reporte</button>
+  </section>
+  <form id="form" hidden>
+   <section class="panel">
+    <div class="section-head"><span class="number">01</span><div><h2>Identificación del equipo</h2><p>Indica dónde está y cómo identificarlo.</p></div></div>
+    <div class="fields">
+     <label>Área o departamento <em>*</em><input name="area" required minlength="2" maxlength="120" placeholder="Ej. Urgencias, quirófano, UCI" autocomplete="off"></label>
+     <label>Nombre del equipo <em>*</em><input name="equipo" required minlength="2" maxlength="160" placeholder="Ej. Monitor de signos vitales"></label>
+     <div class="two">
+      <label>Marca<input name="marca" maxlength="80" placeholder="Ej. Philips"></label>
+      <label>Modelo<input name="modelo" maxlength="80" placeholder="Ej. MP50"></label>
+     </div>
+     <div class="two">
+      <label>Número de serie<input name="numero_serie" maxlength="100" placeholder="N/S"></label>
+      <label>Número de inventario<input name="inventario" maxlength="100" placeholder="Inventario"></label>
+     </div>
+    </div>
+   </section>
+   <section class="panel">
+    <div class="section-head"><span class="number">02</span><div><h2>Tipo de solicitud</h2><p>Selecciona el servicio que requiere el equipo.</p></div></div>
+    <div class="fields">
+     <label>Servicio solicitado <em>*</em><select name="tipo" required>
+      <option value="" disabled selected>Seleccionar servicio</option>
+      <option value="fuera_servicio">Equipo fuera de servicio</option>
+      <option value="correctivo">Mantenimiento correctivo</option>
+      <option value="preventivo">Mantenimiento preventivo</option>
+      <option value="instalacion">Instalación</option>
+      <option value="apertura">Apertura / puesta en marcha</option>
+     </select></label>
+     <label>Prioridad solicitada <em>*</em><select name="prioridad" required>
+      <option value="media" selected>Media — Requiere atención</option>
+      <option value="baja">Baja — Programable</option>
+      <option value="alta">Alta — Afecta la operación</option>
+      <option value="critica">Crítica — Posible riesgo para pacientes</option>
+     </select></label>
+     <label>Descripción del problema o trabajo <em>*</em><textarea name="descripcion" required minlength="10" maxlength="2000" rows="5" placeholder="Describe qué falla, desde cuándo, cualquier alarma que muestre y qué necesitas que se realice."></textarea><small class="hint">No incluyas nombres ni datos clínicos de pacientes.</small></label>
+    </div>
+   </section>
+   <section class="panel">
+    <div class="section-head"><span class="number">03</span><div><h2>Datos de contacto</h2><p>Para poder comunicarnos sobre tu reporte.</p></div></div>
+    <div class="fields">
+     <label>Nombre de quien reporta <em>*</em><input name="reportante" required minlength="3" maxlength="120" autocomplete="name" placeholder="Nombre y apellido"></label>
+     <label>Teléfono, extensión o correo <em>*</em><input name="contacto" required minlength="5" maxlength="150" placeholder="Ej. Ext. 123 / 55..." autocomplete="off"></label>
+    </div>
+   </section>
+   <div class="notice"><strong>Importante:</strong> Este portal genera solicitudes de Servicio Técnico; no sustituye los protocolos de emergencia clínica del hospital. Si hay un riesgo inmediato para un paciente, utiliza también el canal de emergencia establecido.</div>
+   <div class="actions"><button id="enviar" type="submit">Enviar reporte <span>→</span></button><p>Los campos con * son obligatorios.</p></div>
+  </form>
+ </main>
+ <footer>Servicio Técnico · Portal de reportes hospitalarios</footer>
+</body>
+</html>

@@ -6,6 +6,7 @@ const crearRouterViaticos = require('./routes/viaticos');
 const crearRouterComprobantesViaticos = require('./routes/comprobantesViaticos');
 const { crearSeguridad } = require('./security/sesiones');
 const { crearRouterAdminUsuarios } = require('./routes/adminUsuarios');
+const { crearRouterReportesHospitalarios } = require('./routes/reportesHospitalarios');
 require('dotenv').config();
 
 const app = express();
@@ -20,12 +21,35 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
+// Web de reportes hospitalarios: el QR identifica al hospital para CREAR reportes.
+// Las funciones de administración siguen protegidas por sesión y rol.
+app.use('/hospital-assets', express.static(path.join(__dirname, 'public', 'hospital'), {
+  index: false,
+  fallthrough: false,
+  setHeaders(res) { res.setHeader('Referrer-Policy', 'no-referrer'); }
+}));
+app.get('/hospital/:token', (req, res) => {
+  if (!/^[A-Za-z0-9_-]{43}$/.test(req.params.token)) {
+    return res.status(404).send('Enlace inválido.');
+  }
+  res.set('Cache-Control', 'no-store');
+  res.set('Referrer-Policy', 'no-referrer');
+  res.set('Content-Security-Policy', "default-src 'none'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'");
+  return res.sendFile(path.join(__dirname, 'public', 'hospital', 'index.html'));
+});
+
 // Login y permisos. Montar ANTES de las rutas de órdenes y viáticos.
 // TRANSICIÓN: APP_AUTH_REQUIRED=false mantiene los APK actuales funcionando.
 // PRODUCCIÓN: activar true solamente cuando ambos servicios y teléfonos estén actualizados.
 app.set('trust proxy', 1); // Render: acceso desde un proxy inverso.
 const seguridad = crearSeguridad(pool);
 app.use('/api/auth', seguridad.router);
+// Reportes hospitalarios: para ADMIN usar verificación OBLIGATORIA de sesión,
+// aunque APP_AUTH_REQUIRED=false mantenga accesibles algunos APK antiguos.
+app.use('/api/reportes-hospitalarios', crearRouterReportesHospitalarios({
+  pool,
+  requerirSesion: seguridad.verificarSesionSiempre
+}));
 // Administración protegida SIEMPRE: requiere token y rol admin aunque otras
 // rutas se encuentren temporalmente con APP_AUTH_REQUIRED=false.
 app.use('/api/admin/usuarios', seguridad.verificarSesionSiempre, crearRouterAdminUsuarios(pool));
