@@ -9,6 +9,7 @@ const { crearRouterAdminUsuarios } = require('./routes/adminUsuarios');
 const { crearRouterReportesHospitalarios } = require('./routes/reportesHospitalarios');
 const { crearRouterAccesoHospital } = require('./routes/accesoHospital');
 const { crearRouterAsignacionesHospitalarias } = require('./routes/asignacionesHospitalarias');
+const { crearRouterPushTecnicos } = require('./routes/pushTecnicos');
 require('dotenv').config();
 
 const app = express();
@@ -54,6 +55,7 @@ app.use('/api/reportes-hospitalarios', crearRouterReportesHospitalarios({
   requerirSesion: seguridad.verificarSesionSiempre
 }));
 app.use('/api/reportes-asignaciones', crearRouterAsignacionesHospitalarias(pool, seguridad.verificarSesionSiempre));
+app.use('/api/push-tecnicos', crearRouterPushTecnicos(pool, seguridad.verificarSesionSiempre));
 // Administración protegida SIEMPRE: requiere token y rol admin aunque otras
 // rutas se encuentren temporalmente con APP_AUTH_REQUIRED=false.
 app.use('/api/admin/usuarios', seguridad.verificarSesionSiempre, crearRouterAdminUsuarios(pool));

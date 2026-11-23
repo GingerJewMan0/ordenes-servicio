@@ -1,6 +1,7 @@
 'use strict';
 // Router ADITIVO; NO reemplaza reportesHospitalarios.js ni cambia rutas existentes.
 const express = require('express');
+const { enviarPushAsignacion } = require('../services/notificacionesPush');
 
 const TECNICO = 'tecnico';
 const ESTADOS_TECNICO = new Set(['en_proceso', 'pendiente_refacciones', 'finalizado']);
@@ -104,6 +105,11 @@ function crearRouterAsignacionesHospitalarias(pool, verificarSesionSiempre) {
       if (previo) await c.query(`UPDATE public.reportes_hospitalarios_notificaciones SET leida_en=NOW()
         WHERE reporte_id=$1 AND usuario_id::text=$2 AND leida_en IS NULL`,[id,previo]);
       await c.query('COMMIT');
+      // Enviar notificación después de guardar la asignación.
+      void enviarPushAsignacion(pool, tecnico.id, reporte.folio, id)
+        .catch(e => {
+          console.error('[push/asignacion]', e?.message || 'error');
+        });
       return res.json({ok:true,folio:reporte.folio,tecnico:tecnico.usuario,estado:nuevoEstado,aviso_creado:true});
     } catch(e) {
       if(c){try{await c.query('ROLLBACK');}catch(_){}}
