@@ -12,7 +12,14 @@ import EditOrderScreen from './src/screens/EditOrderScreen';
 import ViaticosScreen from './src/screens/ViaticosScreen';
 import LoginScreen from './src/screens/LoginScreen';
 import AdminUsuariosScreen from './src/screens/AdminUsuariosScreen';
+import ReportesHospitalariosScreen from './src/screens/ReportesHospitalariosScreen';
+import MisReportesScreen from './src/screens/MisReportesScreen';
 import {configurarAxiosConSesion, establecerManejadorSesionCaducada, restaurarSesion, cerrarSesion} from './src/services/authSesion';
+import {
+  registrarNotificacionesTecnico,
+  desregistrarNotificacionesTecnico
+} from './src/services/pushTecnicos';
+import * as Notifications from 'expo-notifications';
 
 // Conservamos el Stack original para no alterar las pantallas de órdenes.
 // El menú lateral es propio de React Native; no exige bibliotecas nuevas.
@@ -25,6 +32,11 @@ export default function App() {
   const [usuarioActual, setUsuarioActual] = useState(null);
   const [verificando, setVerificando] = useState(true);
   const [errorInicio, setErrorInicio] = useState('');
+
+  // Controlar la navegación desde las notificaciones push.
+  const ultimaRespuesta = Notifications.useLastNotificationResponse();
+  const [navegacionLista, setNavegacionLista] = useState(0);
+
   const cargarSesion = async () => {
     setVerificando(true);
     setErrorInicio('');
@@ -41,12 +53,84 @@ export default function App() {
     cargarSesion();
     return () => establecerManejadorSesionCaducada(null);
   }, []);
+  // Registrar notificaciones push únicamente para técnicos.
+  useEffect(() => {
+    if (usuarioActual?.rol !== 'tecnico') return;
+
+    let cancelado = false;
+
+    registrarNotificacionesTecnico(() => cancelado)
+      .then((resultado) => {
+        if (!cancelado && !resultado?.ok) {
+          console.warn(
+            '[Push] Registro no completado:',
+            resultado?.motivo || 'Sin detalles'
+          );
+        }
+      })
+      .catch((error) => {
+        if (!cancelado) {
+          console.warn(
+            '[Push] Error al registrar dispositivo:',
+            error?.message || 'Error desconocido'
+          );
+        }
+      });
+
+    return () => {
+      cancelado = true;
+    };
+    }, [usuarioActual?.id, usuarioActual?.rol]);
+
+   // Procesar la notificación cuando la navegación esté preparada.
+  useEffect(() => {
+    const datos = ultimaRespuesta?.notification?.request?.content?.data;
+
+    if (
+      usuarioActual?.rol !== 'tecnico' ||
+      datos?.tipo !== 'reporte_asignado' ||
+      navegacionLista === 0 ||
+      !navigationRef.isReady()
+    ) {
+      return;
+    }
+
+    navigationRef.navigate('MisReportes');
+
+  }, [ultimaRespuesta, usuarioActual?.rol, navegacionLista]);
+
   const salir = async () => {
-    setMenuVisible(false);
-    const revocada = await cerrarSesion();
-    setUsuarioActual(null);
-    if (!revocada) Alert.alert('Sesión cerrada en este teléfono', 'No se pudo contactar al servidor para revocarla. Caducará automáticamente; cuando haya conexión puedes volver a iniciar sesión.');
-  };
+      setMenuVisible(false);
+
+      // Retirar las notificaciones antes de cerrar la sesión.
+      if (usuarioActual?.rol === 'tecnico') {
+        try {
+          const retirado = await desregistrarNotificacionesTecnico();
+
+          if (!retirado) {
+            console.warn(
+              '[Push] No se pudo retirar el dispositivo del servidor.'
+            );
+          }
+        } catch (error) {
+          console.warn(
+            '[Push] Error al retirar notificaciones:',
+            error?.message || 'Error desconocido'
+          );
+        }
+      }
+
+      // Conservar el cierre de sesión original.
+      const revocada = await cerrarSesion();
+      setUsuarioActual(null);
+
+      if (!revocada) {
+        Alert.alert(
+          'Sesión cerrada en este teléfono',
+          'No se pudo contactar al servidor para revocarla. Caducará automáticamente; cuando haya conexión puedes volver a iniciar sesión.'
+        );
+      }
+    };
 
   const navegar = (pantalla) => {
     setMenuVisible(false);
@@ -77,16 +161,17 @@ export default function App() {
   return (
     <>
       <NavigationContainer
-        ref={navigationRef}
-        onReady={() => {
-          const ruta = navigationRef.getCurrentRoute();
-          if (ruta?.name) setPantallaActiva(ruta.name);
-        }}
-        onStateChange={() => {
-          const ruta = navigationRef.getCurrentRoute();
-          if (ruta?.name) setPantallaActiva(ruta.name);
-        }}
-      >
+  ref={navigationRef}
+  onReady={() => {
+    const ruta = navigationRef.getCurrentRoute();
+    if (ruta?.name) setPantallaActiva(ruta.name);
+    setNavegacionLista(n => n + 1);
+  }}
+  onStateChange={() => {
+    const ruta = navigationRef.getCurrentRoute();
+    if (ruta?.name) setPantallaActiva(ruta.name);
+  }}
+>
         <Stack.Navigator initialRouteName="Home" screenOptions={{
           headerTintColor: '#154b78',
           headerTitleStyle: { fontWeight: '700' },
@@ -122,6 +207,16 @@ export default function App() {
             name="AdministracionUsuarios"
             component={AdminUsuariosScreen}
             options={{ title: 'Administración de usuarios', headerLeft: botonMenu }}
+          />}
+          {usuarioActual?.rol === 'tecnico' && <Stack.Screen
+            name="MisReportes"
+            component={MisReportesScreen}
+            options={{ title: 'Mis reportes asignados', headerLeft: botonMenu }}
+          />}
+          {usuarioActual?.rol === 'admin' && <Stack.Screen
+            name="ReportesHospitalarios"
+            component={ReportesHospitalariosScreen}
+            options={{ title: 'Reportes Hospitalarios', headerLeft: botonMenu }}
           />}
         </Stack.Navigator>
       </NavigationContainer>
@@ -162,6 +257,18 @@ export default function App() {
               <Text style={styles.opcionEmoji}>💼</Text>
               <Text style={styles.opcionTexto}>Generador de Viáticos</Text>
             </TouchableOpacity>
+            {usuarioActual?.rol === 'tecnico' && <TouchableOpacity
+              style={[styles.opcion, pantallaActiva === 'MisReportes' && styles.opcionActiva]}
+              onPress={() => navegar('MisReportes')} accessibilityRole="button"
+            ><Text style={styles.opcionEmoji}>🔔</Text><Text style={styles.opcionTexto}>Mis reportes asignados</Text></TouchableOpacity>}
+            {usuarioActual?.rol === 'admin' && <TouchableOpacity
+              style={[styles.opcion, pantallaActiva === 'ReportesHospitalarios' && styles.opcionActiva]}
+              onPress={() => navegar('ReportesHospitalarios')}
+              accessibilityRole="button"
+            >
+              <Text style={styles.opcionEmoji}>🏥</Text>
+              <Text style={styles.opcionTexto}>Reportes Hospitalarios</Text>
+            </TouchableOpacity>}
             {usuarioActual?.rol === 'admin' && <TouchableOpacity
               style={[styles.opcion, pantallaActiva === 'AdministracionUsuarios' && styles.opcionActiva]}
               onPress={() => navegar('AdministracionUsuarios')}

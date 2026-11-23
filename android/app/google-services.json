@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "423633291951",
+    "project_id": "servicio-tecnico-hospitalario",
+    "storage_bucket": "servicio-tecnico-hospitalario.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:423633291951:android:bae8549e3f31d5edd1a25a",
+        "android_client_info": {
+          "package_name": "com.gingerjew0.ordenesservicioapp"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCvQFhVlhARb3vr_6mFBviQhD8lVEHQ-_o"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

@@ -1,3 +1,4 @@
+
 {
   "expo": {
     "extra": {
@@ -6,10 +7,12 @@
       }
     },
     "android": {
-      "package": "com.gingerjew0.ordenesservicioapp"
+      "package": "com.gingerjew0.ordenesservicioapp",
+      "googleServicesFile": "./android/app/google-services.json"
     },
     "plugins": [
-      "expo-secure-store"
+      "expo-secure-store",
+      "expo-notifications"
     ]
   }
 }
