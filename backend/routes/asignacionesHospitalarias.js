@@ -315,12 +315,21 @@ function crearRouterAsignacionesHospitalarias(pool, verificarSesionSiempre) {
         });
       }
 
-      // Eliminar solamente la relacion de asignacion adicional.
-      await c.query(`
+      // Eliminar la asignacion y verificar que realmente se elimino.
+      const { rowCount } = await c.query(`
         DELETE FROM public.reportes_hospitalarios_tecnicos_adicionales
         WHERE reporte_id = $1
           AND tecnico_id = $2
-      `, [id, tecnico.id]);
+        RETURNING tecnico_id
+      `, [id, tecnico.tecnico_id]);
+
+      if (rowCount !== 1) {
+        await c.query('ROLLBACK');
+
+        return res.status(409).json({
+          error: 'No se pudo confirmar la retirada del tecnico.'
+        });
+      }
 
       // Registrar la operacion en el historial.
       await c.query(`
@@ -342,7 +351,7 @@ function crearRouterAsignacionesHospitalarias(pool, verificarSesionSiempre) {
         WHERE reporte_id = $1
           AND usuario_id = $2
           AND leida_en IS NULL
-      `, [id, tecnico.id]);
+      `, [id, tecnico.tecnico_id]);
 
       await c.query('COMMIT');
 
