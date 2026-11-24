@@ -6,8 +6,17 @@ function crearRouterPushTecnicos(pool, verificarSesionSiempre) {
   const router = express.Router();
   router.use((_req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
   router.use(verificarSesionSiempre);
-  router.use((req, res, next) => req.usuarioApp?.rol === 'tecnico'
-    ? next() : res.status(403).json({error: 'Solo usuarios técnicos.'}));
+  router.use((req, res, next) => {
+  const rol = req.usuarioApp?.rol;
+
+  if (rol === 'tecnico' || rol === 'admin') {
+    return next();
+  }
+
+  return res.status(403).json({
+    error: 'Solo técnicos o administradores.'
+  });
+});
 
   router.post('/registrar', async (req, res) => {
     const token = req.body?.expo_push_token;

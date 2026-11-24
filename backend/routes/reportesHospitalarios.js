@@ -1,6 +1,7 @@
 'use strict';
 // Se monta SIN cambiar las rutas de órdenes ni viáticos.
 // Reutiliza obligatoriamente el middleware requerirSesion del backend actual.
+const { enviarPushNuevoReporteAdministradores } = require('../services/notificacionesPush');
 const express = require('express');
 const crypto = require('node:crypto');
 const rateLimit = require('express-rate-limit');
@@ -95,6 +96,14 @@ function crearRouterReportesHospitalarios({ pool, requerirSesion } = {}) {
       await client.query(`INSERT INTO public.reportes_hospitalarios_historial
         (reporte_id,estado_anterior,estado_nuevo,nota,actor) VALUES ($1,NULL,'recibido',NULL,'hospital')`, [id]);
       await client.query('COMMIT');
+      // Notificar a los administradores después de guardar el reporte.
+void enviarPushNuevoReporteAdministradores(pool, folio, id)
+  .catch((error) => {
+    console.error(
+      '[push/nuevo-reporte]',
+      error?.message || 'Error al enviar notificación'
+    );
+  });
       return res.status(201).json({folio,estado:'recibido',mensaje:'Reporte enviado correctamente.'});
     } catch(e) {
       if (client) { try { await client.query('ROLLBACK'); } catch(_) {} }

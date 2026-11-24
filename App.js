@@ -111,7 +111,7 @@ export default function App() {
   }, []);
   // Registrar notificaciones push únicamente para técnicos.
   useEffect(() => {
-    if (usuarioActual?.rol !== 'tecnico') return;
+    if (!['tecnico', 'admin'].includes(usuarioActual?.rol)) return;
 
     let cancelado = false;
 
@@ -137,28 +137,37 @@ export default function App() {
       cancelado = true;
     };
     }, [usuarioActual?.id, usuarioActual?.rol]);
-
-   // Procesar la notificación cuando la navegación esté preparada.
+  // Procesar la notificación cuando la navegación esté preparada.
   useEffect(() => {
     const datos = ultimaRespuesta?.notification?.request?.content?.data;
 
-    if (
-      usuarioActual?.rol !== 'tecnico' ||
-      datos?.tipo !== 'reporte_asignado' ||
-      navegacionLista === 0 ||
-      !navigationRef.isReady()
-    ) {
+    if (navegacionLista === 0 || !navigationRef.isReady()) {
       return;
     }
 
-    navigationRef.navigate('MisReportes');
+    // Técnicos: abrir sus reportes asignados.
+    if (
+      usuarioActual?.rol === 'tecnico' &&
+      datos?.tipo === 'reporte_asignado'
+    ) {
+      navigationRef.navigate('MisReportes');
+    }
+
+    // Administradores: abrir los reportes hospitalarios.
+    else if (
+      usuarioActual?.rol === 'admin' &&
+      datos?.tipo === 'reporte_hospitalario_nuevo'
+    ) {
+      navigationRef.navigate('ReportesHospitalarios');
+    }
 
   }, [ultimaRespuesta, usuarioActual?.rol, navegacionLista]);
+
 const salir = async () => {
   setMenuVisible(false);
 
   // Retirar las notificaciones push antes de cerrar sesión.
-  if (usuarioActual?.rol === 'tecnico') {
+  if (usuarioActual?.rol === 'tecnico' || usuarioActual?.rol === 'admin') {
     try {
       const retirado = await desregistrarNotificacionesTecnico();
 
