@@ -58,6 +58,315 @@ function crearRouterAsignacionesHospitalarias(pool, verificarSesionSiempre) {
     } catch(e) { fallo(res,e,'asignacion'); }
   });
 
+  // ADMIN: consultar todos los tecnicos asignados a un reporte.
+  r.get('/admin/:id/equipo', soloAdmin, async (req, res) => {
+    const id = idReporte(req.params.id);
+
+    if (!id) {
+      return res.status(400).json({
+        error: 'Reporte invalido.'
+      });
+    }
+
+    try {
+      const { rows } = await pool.query(`
+        SELECT tecnico_id, usuario, tipo
+        FROM (
+          SELECT
+            a.tecnico_id::text AS tecnico_id,
+            u.usuario,
+            'principal'::text AS tipo,
+            0 AS orden
+          FROM public.reportes_hospitalarios_asignaciones a
+          JOIN public.app_usuarios u
+            ON u.id = a.tecnico_id
+          WHERE a.reporte_id = $1
+
+          UNION ALL
+
+          SELECT
+            a.tecnico_id::text AS tecnico_id,
+            u.usuario,
+            'adicional'::text AS tipo,
+            1 AS orden
+          FROM public.reportes_hospitalarios_tecnicos_adicionales a
+          JOIN public.app_usuarios u
+            ON u.id = a.tecnico_id
+          WHERE a.reporte_id = $1
+        ) AS equipo
+        ORDER BY orden, usuario
+      `, [id]);
+
+      return res.json({
+        tecnicos: rows
+      });
+
+    } catch (error) {
+      return fallo(res, error, 'equipo');
+    }
+  });
+
+
+  // ADMIN: agregar un técnico adicional sin reemplazar al principal.
+  r.post('/admin/:id/agregar-tecnico', soloAdmin, async (req, res) => {
+    const id = idReporte(req.params.id);
+    const tecnicoId = idUsuario(req.body?.tecnico_id);
+    const nota = texto(req.body?.nota ?? '', 500);
+
+    if (!id || !tecnicoId || nota === null) {
+      return res.status(400).json({
+        error: 'Reporte, técnico o nota inválidos.'
+      });
+    }
+
+    let c;
+    let reporte;
+    let tecnico;
+
+    try {
+      c = await pool.connect();
+      await c.query('BEGIN');
+
+      const { rows: reportes } = await c.query(`
+        SELECT id, folio, estado
+        FROM public.reportes_hospitalarios
+        WHERE id = $1
+        FOR UPDATE
+      `, [id]);
+
+      reporte = reportes[0];
+
+      if (!reporte) {
+        await c.query('ROLLBACK');
+        return res.status(404).json({
+          error: 'Reporte no encontrado.'
+        });
+      }
+
+      if (['cancelado', 'finalizado'].includes(reporte.estado)) {
+        await c.query('ROLLBACK');
+        return res.status(409).json({
+          error: 'El reporte está cerrado.'
+        });
+      }
+
+      const { rows: usuarios } = await c.query(`
+        SELECT id, usuario
+        FROM public.app_usuarios
+        WHERE id::text = $1
+          AND rol = 'tecnico'
+          AND activo = TRUE
+        LIMIT 1
+      `, [tecnicoId]);
+
+      tecnico = usuarios[0];
+
+      if (!tecnico) {
+        await c.query('ROLLBACK');
+        return res.status(400).json({
+          error: 'Selecciona un técnico activo.'
+        });
+      }
+
+      const { rows: principal } = await c.query(`
+        SELECT tecnico_id
+        FROM public.reportes_hospitalarios_asignaciones
+        WHERE reporte_id = $1
+      `, [id]);
+
+      if (!principal[0]) {
+        await c.query('ROLLBACK');
+        return res.status(409).json({
+          error: 'Primero asigna un técnico principal.'
+        });
+      }
+
+      if (String(principal[0].tecnico_id) === String(tecnico.id)) {
+        await c.query('ROLLBACK');
+        return res.status(409).json({
+          error: 'Este técnico ya es el principal.'
+        });
+      }
+
+      const { rowCount } = await c.query(`
+        INSERT INTO public.reportes_hospitalarios_tecnicos_adicionales
+          (reporte_id, tecnico_id, asignado_por_id)
+        VALUES ($1, $2, $3)
+        ON CONFLICT (reporte_id, tecnico_id) DO NOTHING
+      `, [id, tecnico.id, req.usuarioApp.id]);
+
+      if (rowCount === 0) {
+        await c.query('ROLLBACK');
+        return res.status(409).json({
+          error: 'El técnico ya está asignado.'
+        });
+      }
+
+      await c.query(`
+        INSERT INTO public.reportes_hospitalarios_historial
+          (reporte_id, estado_anterior, estado_nuevo, nota, actor)
+        VALUES ($1, $2, $2, $3, $4)
+      `, [
+        id,
+        reporte.estado,
+        `Técnico adicional: ${tecnico.usuario}.${nota ? ' ' + nota : ''}`,
+        String(req.usuarioApp.usuario || req.usuarioApp.id)
+      ]);
+
+      await c.query(`
+        INSERT INTO public.reportes_hospitalarios_notificaciones
+          (usuario_id, reporte_id, titulo, mensaje)
+        VALUES ($1, $2, $3, $4)
+      `, [
+        tecnico.id,
+        id,
+        'Nuevo reporte asignado',
+        `Se te asignó el reporte ${reporte.folio}.`
+      ]);
+
+      await c.query('COMMIT');
+
+      // Enviar push después de confirmar la asignación.
+      void enviarPushAsignacion(pool, tecnico.id, reporte.folio, id)
+        .catch(error => {
+          console.error('[push/tecnico-adicional]', error?.message);
+        });
+
+      return res.status(201).json({
+        ok: true,
+        folio: reporte.folio,
+        tecnico: tecnico.usuario,
+        tipo: 'adicional'
+      });
+
+    } catch (error) {
+      if (c) {
+        try {
+          await c.query('ROLLBACK');
+        } catch (_) {}
+      }
+      return fallo(res, error, 'agregar-tecnico');
+    } finally {
+      if (c) c.release();
+    }
+  });
+
+
+  // ADMIN: retirar un tecnico adicional sin afectar al principal.
+  r.delete('/admin/:id/tecnicos-adicionales/:tecnicoId', soloAdmin, async (req, res) => {
+    const id = idReporte(req.params.id);
+    const tecnicoId = idUsuario(req.params.tecnicoId);
+    const nota = texto(req.body?.nota ?? '', 500);
+
+    if (!id || !tecnicoId || nota === null) {
+      return res.status(400).json({
+        error: 'Reporte, tecnico o nota invalidos.'
+      });
+    }
+
+    let c;
+
+    try {
+      c = await pool.connect();
+      await c.query('BEGIN');
+
+      // Bloquear el reporte durante la operacion.
+      const { rows: reportes } = await c.query(`
+        SELECT id, folio, estado
+        FROM public.reportes_hospitalarios
+        WHERE id = $1
+        FOR UPDATE
+      `, [id]);
+
+      const reporte = reportes[0];
+
+      if (!reporte) {
+        await c.query('ROLLBACK');
+        return res.status(404).json({
+          error: 'Reporte no encontrado.'
+        });
+      }
+
+      if (['cancelado', 'finalizado'].includes(reporte.estado)) {
+        await c.query('ROLLBACK');
+        return res.status(409).json({
+          error: 'No se pueden modificar asignaciones de un reporte cerrado.'
+        });
+      }
+
+      // Verificar que el tecnico este asignado como adicional.
+      const { rows: adicionales } = await c.query(`
+        SELECT
+          ad.tecnico_id,
+          u.usuario
+        FROM public.reportes_hospitalarios_tecnicos_adicionales ad
+        JOIN public.app_usuarios u
+          ON u.id = ad.tecnico_id
+        WHERE ad.reporte_id = $1
+          AND ad.tecnico_id::text = $2
+      `, [id, tecnicoId]);
+
+      const tecnico = adicionales[0];
+
+      if (!tecnico) {
+        await c.query('ROLLBACK');
+        return res.status(404).json({
+          error: 'Este tecnico no esta asignado como adicional.'
+        });
+      }
+
+      // Eliminar solamente la relacion de asignacion adicional.
+      await c.query(`
+        DELETE FROM public.reportes_hospitalarios_tecnicos_adicionales
+        WHERE reporte_id = $1
+          AND tecnico_id = $2
+      `, [id, tecnico.id]);
+
+      // Registrar la operacion en el historial.
+      await c.query(`
+        INSERT INTO public.reportes_hospitalarios_historial
+          (reporte_id, estado_anterior, estado_nuevo, nota, actor)
+        VALUES ($1, $2, $3, $4, $5)
+      `, [
+        id,
+        reporte.estado,
+        reporte.estado,
+        `Tecnico adicional retirado: ${tecnico.usuario}.${nota ? ' ' + nota : ''}`,
+        String(req.usuarioApp.usuario || req.usuarioApp.id)
+      ]);
+
+      // Cerrar los avisos pendientes de este reporte para ese tecnico.
+      await c.query(`
+        UPDATE public.reportes_hospitalarios_notificaciones
+        SET leida_en = NOW()
+        WHERE reporte_id = $1
+          AND usuario_id = $2
+          AND leida_en IS NULL
+      `, [id, tecnico.id]);
+
+      await c.query('COMMIT');
+
+      return res.json({
+        ok: true,
+        folio: reporte.folio,
+        tecnico: tecnico.usuario,
+        retirado: true
+      });
+
+    } catch (error) {
+      if (c) {
+        try {
+          await c.query('ROLLBACK');
+        } catch (_) {}
+      }
+
+      return fallo(res, error, 'retirar-tecnico');
+
+    } finally {
+      if (c) c.release();
+    }
+  });
+
   r.post('/admin/:id/asignar', soloAdmin, async (req,res) => {
     const id = idReporte(req.params.id);
     const tecnicoId = idUsuario(req.body?.tecnico_id);
@@ -84,6 +393,22 @@ function crearRouterAsignacionesHospitalarias(pool, verificarSesionSiempre) {
       const previo=previos[0]?.tecnico_id;
       if (previo === String(tecnico.id)) {
         await c.query('ROLLBACK'); return res.status(409).json({error:'Este reporte ya está asignado a ese técnico.'});
+      }
+
+      // Evitar que el nuevo principal ya figure como tecnico adicional.
+      const { rows: adicionalesExistentes } = await c.query(`
+        SELECT 1
+        FROM public.reportes_hospitalarios_tecnicos_adicionales
+        WHERE reporte_id = $1
+          AND tecnico_id = $2
+        LIMIT 1
+      `, [id, tecnico.id]);
+
+      if (adicionalesExistentes.length > 0) {
+        await c.query('ROLLBACK');
+        return res.status(409).json({
+          error: 'Este tecnico ya esta asignado como adicional. Retiralo de los adicionales antes de nombrarlo principal.'
+        });
       }
       const nuevoEstado = ['recibido','en_revision','programado','asignado'].includes(reporte.estado)
         ? 'asignado' : reporte.estado;
@@ -137,31 +462,106 @@ function crearRouterAsignacionesHospitalarias(pool, verificarSesionSiempre) {
     } catch(e){fallo(res,e,'leer-aviso');}
   });
 
-  r.get('/mis', soloTecnico, async (req,res) => {
+  // TECNICO: ver reportes asignados como principal o adicional.
+  r.get('/mis', soloTecnico, async (req, res) => {
     try {
-      const {rows}=await pool.query(`SELECT r.id,r.folio,r.estado,r.tipo,r.prioridad,r.area,r.equipo,
-          r.creado_en,r.actualizado_en,h.nombre AS hospital,a.asignado_en
-         FROM public.reportes_hospitalarios_asignaciones a
-         JOIN public.reportes_hospitalarios r ON r.id=a.reporte_id
-         JOIN public.hospitales_reportantes h ON h.id=r.hospital_id
-         WHERE a.tecnico_id=$1 ORDER BY a.actualizado_en DESC,r.id DESC LIMIT 100`,[req.usuarioApp.id]);
-      res.json({reportes:rows});
-    } catch(e){fallo(res,e,'mis-reportes');}
+      const { rows } = await pool.query(`
+        SELECT
+          r.id,
+          r.folio,
+          r.estado,
+          r.tipo,
+          r.prioridad,
+          r.area,
+          r.equipo,
+          r.creado_en,
+          r.actualizado_en,
+          h.nombre AS hospital,
+          COALESCE(ap.asignado_en, ad.asignado_en) AS asignado_en
+        FROM public.reportes_hospitalarios r
+        JOIN public.hospitales_reportantes h
+          ON h.id = r.hospital_id
+        LEFT JOIN public.reportes_hospitalarios_asignaciones ap
+          ON ap.reporte_id = r.id
+          AND ap.tecnico_id = $1
+        LEFT JOIN public.reportes_hospitalarios_tecnicos_adicionales ad
+          ON ad.reporte_id = r.id
+          AND ad.tecnico_id = $1
+        WHERE
+          ap.reporte_id IS NOT NULL
+          OR ad.reporte_id IS NOT NULL
+        ORDER BY
+          COALESCE(ap.actualizado_en, ad.actualizado_en) DESC,
+          r.id DESC
+        LIMIT 100
+      `, [req.usuarioApp.id]);
+
+      return res.json({ reportes: rows });
+    } catch (e) {
+      return fallo(res, e, 'mis-reportes');
+    }
   });
-  r.get('/mis/:id', soloTecnico, async (req,res) => {
-    const id=idReporte(req.params.id);
-    if(!id) return res.status(400).json({error:'Reporte inválido.'});
+
+  // TECNICO: consultar el detalle de un reporte asignado.
+  r.get('/mis/:id', soloTecnico, async (req, res) => {
+    const id = idReporte(req.params.id);
+
+    if (!id) {
+      return res.status(400).json({
+        error: 'Reporte invalido.'
+      });
+    }
+
     try {
-      const {rows}=await pool.query(`SELECT r.*,h.nombre AS hospital,a.asignado_en
-          FROM public.reportes_hospitalarios r JOIN public.hospitales_reportantes h ON h.id=r.hospital_id
-          JOIN public.reportes_hospitalarios_asignaciones a ON a.reporte_id=r.id
-          WHERE r.id=$1 AND a.tecnico_id=$2`,[id,req.usuarioApp.id]);
-      if(!rows[0])return res.status(404).json({error:'Reporte no asignado a tu cuenta.'});
-      const h=await pool.query(`SELECT estado_anterior,estado_nuevo,nota,actor,fecha
-          FROM public.reportes_hospitalarios_historial WHERE reporte_id=$1 ORDER BY fecha ASC,id ASC`,[id]);
-      res.json({reporte:rows[0],historial:h.rows});
-    } catch(e){fallo(res,e,'mi-detalle');}
+      const { rows } = await pool.query(`
+        SELECT
+          r.*,
+          h.nombre AS hospital,
+          COALESCE(ap.asignado_en, ad.asignado_en) AS asignado_en
+        FROM public.reportes_hospitalarios r
+        JOIN public.hospitales_reportantes h
+          ON h.id = r.hospital_id
+        LEFT JOIN public.reportes_hospitalarios_asignaciones ap
+          ON ap.reporte_id = r.id
+          AND ap.tecnico_id = $2
+        LEFT JOIN public.reportes_hospitalarios_tecnicos_adicionales ad
+          ON ad.reporte_id = r.id
+          AND ad.tecnico_id = $2
+        WHERE
+          r.id = $1
+          AND (
+            ap.reporte_id IS NOT NULL
+            OR ad.reporte_id IS NOT NULL
+          )
+      `, [id, req.usuarioApp.id]);
+
+      if (!rows[0]) {
+        return res.status(404).json({
+          error: 'Reporte no asignado a tu cuenta.'
+        });
+      }
+
+      const h = await pool.query(`
+        SELECT
+          estado_anterior,
+          estado_nuevo,
+          nota,
+          actor,
+          fecha
+        FROM public.reportes_hospitalarios_historial
+        WHERE reporte_id = $1
+        ORDER BY fecha ASC, id ASC
+      `, [id]);
+
+      return res.json({
+        reporte: rows[0],
+        historial: h.rows
+      });
+    } catch (e) {
+      return fallo(res, e, 'mi-detalle');
+    }
   });
+
   r.patch('/mis/:id/estado', soloTecnico, async (req,res) => {
     const id=idReporte(req.params.id);
     const estado=req.body?.estado;
@@ -172,9 +572,26 @@ function crearRouterAsignacionesHospitalarias(pool, verificarSesionSiempre) {
     let c;
     try {
       c=await pool.connect(); await c.query('BEGIN');
-      const {rows}=await c.query(`SELECT r.estado FROM public.reportes_hospitalarios r
-         JOIN public.reportes_hospitalarios_asignaciones a ON a.reporte_id=r.id
-         WHERE r.id=$1 AND a.tecnico_id=$2 FOR UPDATE OF r`,[id,req.usuarioApp.id]);
+      const {rows}=await c.query(`
+        SELECT r.estado
+        FROM public.reportes_hospitalarios r
+        WHERE r.id = $1
+          AND (
+            EXISTS (
+              SELECT 1
+              FROM public.reportes_hospitalarios_asignaciones a
+              WHERE a.reporte_id = r.id
+                AND a.tecnico_id = $2
+            )
+            OR EXISTS (
+              SELECT 1
+              FROM public.reportes_hospitalarios_tecnicos_adicionales ad
+              WHERE ad.reporte_id = r.id
+                AND ad.tecnico_id = $2
+            )
+          )
+        FOR UPDATE OF r
+      `, [id, req.usuarioApp.id]);
       if(!rows[0]) {await c.query('ROLLBACK');return res.status(404).json({error:'Reporte no asignado a tu cuenta.'});}
       const anterior=rows[0].estado;
       if(!(TRANSICIONES[anterior]||[]).includes(estado)) {

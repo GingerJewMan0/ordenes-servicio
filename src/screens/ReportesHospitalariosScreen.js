@@ -5,7 +5,6 @@ import {
 } from 'react-native';
 import {crearApiReportesHospitalarios} from '../services/reportesHospitalariosApi';
 import {asignacionesApi} from '../services/asignacionesHospitalariasApi';
-
 const ESTADOS = [
   {key:'recibido',label:'Recibido'},
   {key:'en_revision',label:'En revisión'},
@@ -19,7 +18,6 @@ const ESTADOS = [
 const estadoNombre = s => ESTADOS.find(e=>e.key===s)?.label || s;
 const tipoNombre = t => ({fuera_servicio:'Equipo fuera de servicio',correctivo:'Mantenimiento correctivo',preventivo:'Mantenimiento preventivo',instalacion:'Instalación',apertura:'Apertura / puesta en marcha'})[t] || t;
 const fecha = v => v ? new Date(v).toLocaleString('es-MX') : '—';
-
 /**
  * Esta pantalla utiliza el axios global que configura authSesion.js.
  * authSesion.js fue revisado: axios añade Bearer al host del login y reportes.
@@ -42,8 +40,12 @@ export default function ReportesHospitalariosScreen() {
   const [tecnicos,setTecnicos]=useState([]);
   const [tecnicoElegido,setTecnicoElegido]=useState('');
   const [asignacion,setAsignacion]=useState(null);
+  const [equipoAsignado,setEquipoAsignado]=useState([]);
+  const [tecnicosAdicionalesElegidos,setTecnicosAdicionalesElegidos]=useState([]);
   const [notaAsignacion,setNotaAsignacion]=useState('');
   const [asignando,setAsignando]=useState(false);
+  const [agregandoAdicionales,setAgregandoAdicionales]=useState(false);
+  const [retirandoTecnicoId,setRetirandoTecnicoId]=useState(null);
   const [errorTecnicos,setErrorTecnicos]=useState('');
   const cargar=useCallback(async()=>{
     if(!api) return;
@@ -58,16 +60,50 @@ export default function ReportesHospitalariosScreen() {
   },[api,filtro]);
   useEffect(()=>{cargar();const i=setInterval(cargar,60000);return()=>clearInterval(i);},[cargar]);
   const abrir=async(r)=>{
-    setSeleccion(r);setDetalle(null);setEstado(r.estado);setNota('');
+    setSeleccion(r);
+    setDetalle(null);
+    setEstado(r.estado);
+    setNota('');
+    setEquipoAsignado([]);
+    setTecnicosAdicionalesElegidos([]);
+    setNotaAsignacion('');
+
     try {
       const d=await api.detalle(r.id);
       setDetalle(d);
-    }catch(e){setSeleccion(null);setDetalle(null);return Alert.alert('No se pudo abrir',e.message);}
+    } catch(e) {
+      setSeleccion(null);
+      setDetalle(null);
+      return Alert.alert('No se pudo abrir',e.message);
+    }
+
+    // Conservar la consulta original del tecnico principal.
     try {
-      const [t,a]=await Promise.all([asignacionesApi.tecnicos(),asignacionesApi.asignacion(r.id)]);
-      setTecnicos(t.tecnicos||[]);setAsignacion(a.asignacion||null);
-      setTecnicoElegido(a.asignacion?.tecnico_id||'');setErrorTecnicos('');
-    }catch(e){setTecnicos([]);setAsignacion(null);setTecnicoElegido('');setErrorTecnicos('Asignación no disponible: '+e.message);}
+      const [t,a]=await Promise.all([
+        asignacionesApi.tecnicos(),
+        asignacionesApi.asignacion(r.id)
+      ]);
+
+      setTecnicos(t.tecnicos||[]);
+      setAsignacion(a.asignacion||null);
+      setTecnicoElegido(String(a.asignacion?.tecnico_id||''));
+      setErrorTecnicos('');
+    } catch(e) {
+      setTecnicos([]);
+      setAsignacion(null);
+      setTecnicoElegido('');
+      setErrorTecnicos('Asignacion no disponible: '+e.message);
+    }
+
+    // Nueva consulta independiente para el equipo completo.
+    // Un fallo aqui no bloquea la consulta del tecnico principal.
+    try {
+      const e=await asignacionesApi.equipo(r.id);
+      setEquipoAsignado(Array.isArray(e.tecnicos)?e.tecnicos:[]);
+    } catch(e) {
+      setEquipoAsignado([]);
+      console.warn('[reportes/equipo]',e.message);
+    }
   };
   const guardar=async()=>{
     if(!seleccion||!api)return;
@@ -84,11 +120,195 @@ export default function ReportesHospitalariosScreen() {
     try{
       const x=await asignacionesApi.asignar(seleccion.id,tecnicoElegido,notaAsignacion);
       const [d,a]=await Promise.all([api.detalle(seleccion.id),asignacionesApi.asignacion(seleccion.id)]);
-      setDetalle(d);setAsignacion(a.asignacion);setEstado(d.reporte.estado);setNotaAsignacion('');
+      setDetalle(d);
+      setAsignacion(a.asignacion);
+      setEstado(d.reporte.estado);
+      setNotaAsignacion('');
+      setTecnicosAdicionalesElegidos([]);
+
+      // Actualizar el equipo completo después de cambiar al principal.
+      try {
+        const equipo = await asignacionesApi.equipo(seleccion.id);
+        setEquipoAsignado(
+          Array.isArray(equipo.tecnicos) ? equipo.tecnicos : []
+        );
+      } catch (errorEquipo) {
+        setEquipoAsignado([]);
+        console.warn('[reportes/equipo]', errorEquipo.message);
+      }
+
       await cargar();
+
       Alert.alert('Técnico asignado',`${x.folio} quedó asignado a ${x.tecnico}. El aviso estará en su aplicación.`);
     }catch(e){Alert.alert('No se pudo asignar',e.message);}finally{setAsignando(false);}
   };
+
+  // Seleccionar o desmarcar tecnicos adicionales.
+  const alternarTecnicoAdicional = (tecnicoId) => {
+    const id = String(tecnicoId);
+
+    setTecnicosAdicionalesElegidos(actual =>
+      actual.includes(id)
+        ? actual.filter(x => x !== id)
+        : [...actual, id]
+    );
+  };
+
+  // Guardar los tecnicos adicionales seleccionados.
+  const guardarTecnicosAdicionales = async () => {
+    if (!seleccion || !asignacion?.tecnico_id) {
+      return Alert.alert(
+        'Falta técnico principal',
+        'Primero debes asignar un técnico principal.'
+      );
+    }
+
+    if (tecnicosAdicionalesElegidos.length === 0) {
+      return Alert.alert(
+        'Sin selección',
+        'Selecciona al menos un técnico adicional.'
+      );
+    }
+
+    if (agregandoAdicionales || asignando) return;
+
+    const reporteId = seleccion.id;
+    const agregados = [];
+    const errores = [];
+
+    setAgregandoAdicionales(true);
+
+    try {
+      // Cada asignación se guarda por separado.
+      for (const tecnicoId of [...tecnicosAdicionalesElegidos]) {
+        try {
+          await asignacionesApi.agregarTecnico(
+            reporteId,
+            tecnicoId,
+            notaAsignacion
+          );
+
+          agregados.push(String(tecnicoId));
+        } catch (e) {
+          const nombre = tecnicos.find(
+            t => String(t.id) === String(tecnicoId)
+          )?.usuario || String(tecnicoId);
+
+          errores.push(`${nombre}: ${e.message}`);
+        }
+      }
+
+      // Actualizar los datos incluso si algunos técnicos fallaron.
+      if (agregados.length > 0) {
+        setTecnicosAdicionalesElegidos(actual =>
+          actual.filter(id => !agregados.includes(String(id)))
+        );
+
+        try {
+          const [d, equipo] = await Promise.all([
+            api.detalle(reporteId),
+            asignacionesApi.equipo(reporteId)
+          ]);
+
+          setDetalle(d);
+          setEquipoAsignado(
+            Array.isArray(equipo.tecnicos) ? equipo.tecnicos : []
+          );
+
+          await cargar();
+        } catch (e) {
+          errores.push(
+            'Las asignaciones se guardaron, pero no se pudo actualizar la pantalla: ' +
+            e.message
+          );
+        }
+      }
+
+      if (agregados.length > 0 && errores.length === 0) {
+        setNotaAsignacion('');
+      }
+
+      Alert.alert(
+        errores.length ? 'Revisar asignaciones' : 'Técnicos agregados',
+        `${agregados.length} técnico(s) agregado(s).\n` +
+        (errores.length
+          ? errores.join('\n')
+          : 'Las asignaciones quedaron registradas.')
+      );
+    } finally {
+      setAgregandoAdicionales(false);
+    }
+  };
+
+
+  // Confirmar y retirar un tecnico adicional.
+  const confirmarRetiroTecnico = (tecnico) => {
+    if (!seleccion || retirandoTecnicoId !== null || agregandoAdicionales) {
+      return;
+    }
+
+    Alert.alert(
+      'Retirar técnico adicional',
+      `¿Quieres retirar a ${tecnico.usuario} del reporte ${seleccion.folio}?`,
+      [
+        {text: 'Cancelar', style: 'cancel'},
+        {
+          text: 'Retirar',
+          style: 'destructive',
+          onPress: async () => {
+            const reporteId = seleccion.id;
+            const tecnicoId = String(tecnico.tecnico_id);
+            let retirado = false;
+
+            setRetirandoTecnicoId(tecnicoId);
+
+            try {
+              await asignacionesApi.retirarTecnico(
+                reporteId,
+                tecnicoId
+              );
+
+              retirado = true;
+
+              // Actualizar inmediatamente la lista visible.
+              setEquipoAsignado(actual =>
+                actual.filter(t =>
+                  String(t.tecnico_id) !== tecnicoId
+                )
+              );
+
+              // Actualizar el historial y las asignaciones.
+              const [d, equipo] = await Promise.all([
+                api.detalle(reporteId),
+                asignacionesApi.equipo(reporteId)
+              ]);
+
+              setDetalle(d);
+              setEquipoAsignado(
+                Array.isArray(equipo.tecnicos) ? equipo.tecnicos : []
+              );
+
+              Alert.alert(
+                'Técnico retirado',
+                `${tecnico.usuario} fue retirado de este reporte.`
+              );
+            } catch (e) {
+              Alert.alert(
+                retirado
+                  ? 'Retirado, pero falta actualizar'
+                  : 'No se pudo retirar',
+                e.message
+              );
+            } finally {
+              setRetirandoTecnicoId(null);
+            }
+          }
+        }
+      ]
+    );
+  };
+
+
   return <SafeAreaView style={s.container}>
     <View style={s.header}><View><Text style={s.title}>Reportes hospitalarios</Text><Text style={s.sub}>Solicitudes enviadas mediante códigos QR</Text></View><Text style={s.count}>{nuevos} recibidos</Text></View>
     <ScrollView horizontal showsHorizontalScrollIndicator={false} style={s.filters} contentContainerStyle={s.filterContent}>
@@ -119,13 +339,135 @@ export default function ReportesHospitalariosScreen() {
           <Text style={s.label}>Descripción</Text><Text style={s.description}>{detalle.reporte.descripcion}</Text>
           <Text style={s.label}>Reportado por</Text><Text style={s.line}>{detalle.reporte.reportante} · {detalle.reporte.contacto}</Text>
           <Text style={s.label}>Asignación del técnico</Text>
-          <Text style={s.line}>Técnico actual: {asignacion?.tecnico||'Sin asignar'}</Text>
+          <Text style={s.line}>
+            Técnico principal: {asignacion?.tecnico || 'Sin asignar'}
+          </Text>
+          {equipoAsignado
+            .filter(t => t.tipo === 'adicional')
+            .map(t => (
+              <View
+                key={String(t.tecnico_id)}
+                style={{
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  marginTop: 10
+                }}
+              >
+                <Text style={[s.line, {flex: 1, marginTop: 0}]}>
+                  Técnico adicional: {t.usuario}
+                </Text>
+
+                <Pressable
+                  disabled={
+                    retirandoTecnicoId !== null ||
+                    agregandoAdicionales ||
+                    asignando ||
+                    ['cancelado', 'finalizado'].includes(detalle.reporte.estado)
+                  }
+                  onPress={() => confirmarRetiroTecnico(t)}
+                  style={{
+                    paddingHorizontal: 12,
+                    paddingVertical: 8,
+                    borderRadius: 8,
+                    backgroundColor: '#fbe8e7'
+                  }}
+                >
+                  <Text style={{color: '#a83d38', fontWeight: '700'}}>
+                    {retirandoTecnicoId === String(t.tecnico_id)
+                      ? 'Retirando...'
+                      : 'Retirar'}
+                  </Text>
+                </Pressable>
+              </View>
+            ))}
           {!!errorTecnicos && <Text style={s.error}>{errorTecnicos}</Text>}
           {tecnicos.length===0?<Text style={s.meta}>No hay usuarios técnicos activos. No se puede asignar todavía.</Text>:<View style={s.states}>
             {tecnicos.map(t=><Pressable key={t.id} onPress={()=>setTecnicoElegido(String(t.id))} style={[s.filter,String(tecnicoElegido)===String(t.id)&&s.filterSelected]}><Text style={[s.filterText,String(tecnicoElegido)===String(t.id)&&s.filterSelectedText]}>{t.usuario}</Text></Pressable>)}
           </View>}
           <TextInput style={s.notes} value={notaAsignacion} onChangeText={setNotaAsignacion} maxLength={500} multiline placeholder="Nota opcional para el historial de asignación"/>
           <Pressable disabled={asignando||!tecnicoElegido||['cancelado','finalizado'].includes(detalle.reporte.estado)} onPress={asignar} style={[s.primary,(asignando||!tecnicoElegido||['cancelado','finalizado'].includes(detalle.reporte.estado))&&{opacity:.45}]}><Text style={s.primaryText}>{asignando?'Asignando…':'Asignar / reasignar técnico'}</Text></Pressable>
+
+          {/* Seleccion de tecnicos adicionales */}
+          <Text style={s.label}>Agregar técnicos adicionales</Text>
+
+          {!asignacion?.tecnico_id ? (
+            <Text style={s.meta}>
+              Primero debes asignar un técnico principal.
+            </Text>
+          ) : ['cancelado', 'finalizado'].includes(detalle.reporte.estado) ? (
+            <Text style={s.meta}>
+              No se pueden agregar técnicos a un reporte cerrado.
+            </Text>
+          ) : (
+            <>
+              <Text style={s.meta}>
+                Puedes seleccionar varios técnicos. Los que ya están asignados no aparecen aquí.
+              </Text>
+
+              <View style={[s.states, {marginTop: 12}]}>
+                {tecnicos
+                  .filter(t =>
+                    String(t.id) !== String(asignacion.tecnico_id) &&
+                    !equipoAsignado.some(
+                      a => String(a.tecnico_id) === String(t.id)
+                    )
+                  )
+                  .map(t => {
+                    const seleccionado =
+                      tecnicosAdicionalesElegidos.includes(String(t.id));
+
+                    return (
+                      <Pressable
+                        key={String(t.id)}
+                        onPress={() => alternarTecnicoAdicional(t.id)}
+                        style={[
+                          s.filter,
+                          seleccionado && s.filterSelected
+                        ]}
+                      >
+                        <Text
+                          style={[
+                            s.filterText,
+                            seleccionado && s.filterSelectedText
+                          ]}
+                        >
+                          {seleccionado ? '✓ ' : '+ '}
+                          {t.usuario}
+                        </Text>
+                      </Pressable>
+                    );
+                  })}
+              </View>
+
+              <Text style={s.meta}>
+                Técnicos seleccionados: {tecnicosAdicionalesElegidos.length}
+              </Text>
+
+              <Pressable
+                disabled={
+                  agregandoAdicionales ||
+                  asignando ||
+                  tecnicosAdicionalesElegidos.length === 0
+                }
+                onPress={guardarTecnicosAdicionales}
+                style={[
+                  s.primary,
+                  (
+                    agregandoAdicionales ||
+                    asignando ||
+                    tecnicosAdicionalesElegidos.length === 0
+                  ) && {opacity: 0.45}
+                ]}
+              >
+                <Text style={s.primaryText}>
+                  {agregandoAdicionales
+                    ? 'Guardando técnicos...'
+                    : 'Agregar técnicos seleccionados'}
+                </Text>
+              </Pressable>
+            </>
+          )}
           <Text style={s.label}>Actualizar estado</Text>
           <View style={s.states}>{ESTADOS.map(x=><Pressable key={x.key} onPress={()=>setEstado(x.key)} style={[s.filter,estado===x.key&&s.filterSelected]}><Text style={[s.filterText,estado===x.key&&s.filterSelectedText]}>{x.label}</Text></Pressable>)}</View>
           <Text style={s.label}>Nota de seguimiento</Text>
