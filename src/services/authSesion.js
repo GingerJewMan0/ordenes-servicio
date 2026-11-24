@@ -5,6 +5,78 @@ import * as SecureStore from 'expo-secure-store';
 // la misma sesión en PostgreSQL (misma DATABASE_URL).
 export const API_AUTH_URL = 'https://ordenes-viaticos-test.onrender.com/api/auth';
 const CLAVE_SESION = 'ordenes_viaticos_sesion_v1';
+const CLAVE_CIERRE_PENDIENTE = 'ordenes_viaticos_cierre_pendiente_v1';
+// Cola protegida de cierres pendientes.
+let operacionPendientes = Promise.resolve();
+
+function serializarPendientes(tarea) {
+  const resultado = operacionPendientes.then(tarea, tarea);
+  operacionPendientes = resultado.catch(() => {});
+  return resultado;
+}
+
+async function leerCierresPendientes() {
+  const guardado = await SecureStore.getItemAsync(
+    CLAVE_CIERRE_PENDIENTE
+  );
+
+  if (!guardado) return [];
+
+  try {
+    const lista = JSON.parse(guardado);
+
+    if (
+      Array.isArray(lista) &&
+      lista.every(token => typeof token === 'string')
+    ) {
+      return lista;
+    }
+  } catch (_) {
+    // Compatibilidad con el formato anterior de un solo token.
+    if (/^[A-Za-z0-9_-]{32,256}$/.test(guardado)) {
+      return [guardado];
+    }
+  }
+
+  throw new Error('Formato de cierres pendientes no válido.');
+}
+
+async function agregarCierrePendiente(token) {
+  return serializarPendientes(async () => {
+    const lista = await leerCierresPendientes();
+
+    if (lista.includes(token)) return;
+
+    if (lista.length >= 20) {
+      throw new Error('Se alcanzó el límite de cierres pendientes.');
+    }
+
+    lista.push(token);
+
+    await SecureStore.setItemAsync(
+      CLAVE_CIERRE_PENDIENTE,
+      JSON.stringify(lista)
+    );
+  });
+}
+
+async function quitarCierrePendiente(token) {
+  return serializarPendientes(async () => {
+    const lista = await leerCierresPendientes();
+    const restantes = lista.filter(item => item !== token);
+
+    if (restantes.length === lista.length) return;
+
+    if (restantes.length === 0) {
+      await SecureStore.deleteItemAsync(CLAVE_CIERRE_PENDIENTE);
+    } else {
+      await SecureStore.setItemAsync(
+        CLAVE_CIERRE_PENDIENTE,
+        JSON.stringify(restantes)
+      );
+    }
+  });
+}
 let interceptorInstalado = false;
 let alCaducar = null;
 // El perfil viene de /api/auth/login o /api/auth/me, no de los datos del formulario.
@@ -87,14 +159,107 @@ export async function restaurarSesion() {
 export async function cerrarSesion() {
   const token = await obtenerToken();
   let revocada = !token;
+  let pendienteGuardado = false;
+
   if (token) {
+    // Conservar el token para revocar la sesión si no hay internet.
     try {
-      await axios.post(`${API_AUTH_URL}/logout`, {}, {
-        headers: {Authorization: `Bearer ${token}`}, timeout: 15000
-      });
+  await agregarCierrePendiente(token);
+  pendienteGuardado = true;
+} catch (error) {
+  console.warn(
+    '[Auth] No se pudo guardar el cierre pendiente:',
+    error?.message
+  );
+}
+
+    try {
+      await axios.post(
+        `${API_AUTH_URL}/logout`,
+        {},
+        {
+          headers: {
+            Authorization: `Bearer ${token}`
+          },
+          timeout: 15000
+        }
+      );
+
       revocada = true;
-    } catch (_) { revocada = false; }
+
+      await quitarCierrePendiente(token).catch(error => {
+  console.warn(
+    '[Auth] No se pudo quitar el cierre pendiente:',
+    error?.message
+  );
+});
+
+    } catch (error) {
+      // Sin conexión: conservar el cierre pendiente.
+      revocada = false;
+      console.warn('[Auth] Cierre pendiente de sincronización.');
+      if (!pendienteGuardado) {
+  throw new Error(
+    'No se pudo contactar al servidor ni guardar el cierre pendiente. Vuelve a intentarlo.'
+  );
+}
+    }
   }
+
+  // Cerrar la sesión local incluso sin conexión.
   await caducarSesion();
+
   return revocada;
+}
+export async function sincronizarCierrePendiente() {
+  let pendientes;
+
+  try {
+    pendientes = await serializarPendientes(
+      () => leerCierresPendientes()
+    );
+  } catch (error) {
+    console.warn(
+      '[Auth] No se pudieron leer los cierres pendientes:',
+      error?.message
+    );
+    return false;
+  }
+
+  if (pendientes.length === 0) return true;
+
+  const cliente = axios.create();
+  let todoCorrecto = true;
+
+  for (const token of pendientes) {
+    try {
+      await cliente.post(
+        `${API_AUTH_URL}/logout`,
+        {},
+        {
+          headers: {
+            Authorization: `Bearer ${token}`
+          },
+          timeout: 15000,
+          validateStatus: status =>
+            (status >= 200 && status < 300) || status === 401
+        }
+      );
+
+      // Eliminar únicamente la sesión ya revocada o caducada.
+      await quitarCierrePendiente(token);
+
+      console.log('[Auth] Cierre pendiente sincronizado.');
+    } catch (error) {
+      todoCorrecto = false;
+
+      // Conservar el token para otro intento.
+      console.warn(
+        '[Auth] No se pudo sincronizar un cierre pendiente:',
+        error?.message || 'Sin conexión'
+      );
+    }
+  }
+
+  return todoCorrecto;
 }

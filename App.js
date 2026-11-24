@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import {
-  ActivityIndicator, Alert, Modal, SafeAreaView, StatusBar, StyleSheet, Text, TouchableOpacity, View
+  ActivityIndicator, Alert, AppState, Modal, SafeAreaView, StatusBar, StyleSheet, Text, TouchableOpacity, View
 } from 'react-native';
 import { NavigationContainer, createNavigationContainerRef } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
@@ -14,12 +14,19 @@ import LoginScreen from './src/screens/LoginScreen';
 import AdminUsuariosScreen from './src/screens/AdminUsuariosScreen';
 import ReportesHospitalariosScreen from './src/screens/ReportesHospitalariosScreen';
 import MisReportesScreen from './src/screens/MisReportesScreen';
-import {configurarAxiosConSesion, establecerManejadorSesionCaducada, restaurarSesion, cerrarSesion} from './src/services/authSesion';
+import {
+  configurarAxiosConSesion,
+  establecerManejadorSesionCaducada,
+  restaurarSesion,
+  cerrarSesion,
+  sincronizarCierrePendiente
+} from './src/services/authSesion';
 import {
   registrarNotificacionesTecnico,
   desregistrarNotificacionesTecnico
 } from './src/services/pushTecnicos';
 import * as Notifications from 'expo-notifications';
+import NetInfo from '@react-native-community/netinfo';
 
 // Conservamos el Stack original para no alterar las pantallas de órdenes.
 // El menú lateral es propio de React Native; no exige bibliotecas nuevas.
@@ -52,6 +59,55 @@ export default function App() {
     });
     cargarSesion();
     return () => establecerManejadorSesionCaducada(null);
+  }, []);
+    // Sincronizar cierres de sesión pendientes al abrir o reactivar la app.
+  useEffect(() => {
+    let sincronizando = false;
+
+    const intentarSincronizar = async () => {
+      if (sincronizando) return;
+
+      sincronizando = true;
+
+      try {
+        await sincronizarCierrePendiente();
+      } catch (error) {
+        console.warn(
+          '[Auth] Error de sincronización:',
+          error?.message
+        );
+      } finally {
+        sincronizando = false;
+      }
+    };
+
+    // Intentar al abrir la aplicación.
+    intentarSincronizar();
+
+    // Volver a intentar cuando Android reactive la aplicación.
+    const suscripcion = AppState.addEventListener(
+      'change',
+      (estado) => {
+        if (estado === 'active') {
+          intentarSincronizar();
+        }
+      }
+    );
+
+        // Detectar cuando Android recupera internet.
+    const suscripcionRed = NetInfo.addEventListener((estado) => {
+      if (
+        estado.isConnected === true &&
+        estado.isInternetReachable === true
+      ) {
+        intentarSincronizar();
+      }
+    });
+
+    return () => {
+      suscripcion.remove();
+      suscripcionRed();
+    };
   }, []);
   // Registrar notificaciones push únicamente para técnicos.
   useEffect(() => {
@@ -98,40 +154,44 @@ export default function App() {
     navigationRef.navigate('MisReportes');
 
   }, [ultimaRespuesta, usuarioActual?.rol, navegacionLista]);
+const salir = async () => {
+  setMenuVisible(false);
 
-  const salir = async () => {
-      setMenuVisible(false);
+  // Retirar las notificaciones push antes de cerrar sesión.
+  if (usuarioActual?.rol === 'tecnico') {
+    try {
+      const retirado = await desregistrarNotificacionesTecnico();
 
-      // Retirar las notificaciones antes de cerrar la sesión.
-      if (usuarioActual?.rol === 'tecnico') {
-        try {
-          const retirado = await desregistrarNotificacionesTecnico();
-
-          if (!retirado) {
-            console.warn(
-              '[Push] No se pudo retirar el dispositivo del servidor.'
-            );
-          }
-        } catch (error) {
-          console.warn(
-            '[Push] Error al retirar notificaciones:',
-            error?.message || 'Error desconocido'
-          );
-        }
-      }
-
-      // Conservar el cierre de sesión original.
-      const revocada = await cerrarSesion();
-      setUsuarioActual(null);
-
-      if (!revocada) {
-        Alert.alert(
-          'Sesión cerrada en este teléfono',
-          'No se pudo contactar al servidor para revocarla. Caducará automáticamente; cuando haya conexión puedes volver a iniciar sesión.'
+      if (!retirado) {
+        console.warn(
+          '[Push] No se pudo retirar el dispositivo del servidor.'
         );
       }
-    };
+    } catch (error) {
+      console.warn(
+        '[Push] Error al retirar notificaciones:',
+        error?.message || 'Error desconocido'
+      );
+    }
+  }
 
+  try {
+    const revocada = await cerrarSesion();
+    setUsuarioActual(null);
+
+    if (!revocada) {
+      Alert.alert(
+        'Sesión cerrada en este dispositivo',
+        'No se pudo contactar al servidor. El cierre pendiente se sincronizará cuando vuelva la conexión.'
+      );
+    }
+  } catch (error) {
+    Alert.alert(
+      'No se pudo cerrar sesión de forma segura',
+      error?.message || 'Intenta nuevamente.'
+    );
+  }
+};
   const navegar = (pantalla) => {
     setMenuVisible(false);
     if (navigationRef.isReady()) {
